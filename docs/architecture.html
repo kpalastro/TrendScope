@@ -1,0 +1,872 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TrendScope AI Architecture</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@400;600&display=swap">
+<style>
+  /* Layout: fixed TOC rail beside one measured prose column; figures and tables break to full column width. */
+  :root {
+    --paper: #f8faf7;
+    --surface: #ffffff;
+    --surface-2: #f1f4f0;
+    --ink: #171a18;
+    --muted: #5d665f;
+    --line: #dde2dc;
+    --accent: #0d6b57;
+    --accent-soft: #e6f0eb;
+    --warn: #8a5a12;
+    --warn-soft: #f7edda;
+    --danger: #96301f;
+    --danger-soft: #f8e8e5;
+    --serif: "IBM Plex Serif", Georgia, "Times New Roman", serif;
+    --sans: "IBM Plex Sans", -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #0f1211;
+      --surface: #161b19;
+      --surface-2: #1b211e;
+      --ink: #e7ebe6;
+      --muted: #98a19a;
+      --line: #29302c;
+      --accent: #5cc9a7;
+      --accent-soft: #13332a;
+      --warn: #d9a75f;
+      --warn-soft: #2c2418;
+      --danger: #e58d7e;
+      --danger-soft: #33201c;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #0f1211;
+    --surface: #161b19;
+    --surface-2: #1b211e;
+    --ink: #e7ebe6;
+    --muted: #98a19a;
+    --line: #29302c;
+    --accent: #5cc9a7;
+    --accent-soft: #13332a;
+    --warn: #d9a75f;
+    --warn-soft: #2c2418;
+    --danger: #e58d7e;
+    --danger-soft: #33201c;
+    color-scheme: dark;
+  }
+
+  :root { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { :root { scroll-behavior: auto; } }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  a { color: var(--accent); text-underline-offset: 3px; }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0 0 auto;
+    height: env(safe-area-inset-top, 0px);
+    z-index: 10;
+    background: var(--paper);
+  }
+
+  .site-head {
+    position: sticky;
+    top: env(safe-area-inset-top, 0px);
+    z-index: 5;
+    background: var(--paper);
+    border-bottom: 1px solid var(--line);
+  }
+  .head-inner {
+    max-width: 1180px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 14px max(20px, env(safe-area-inset-right, 0px)) 14px max(20px, env(safe-area-inset-left, 0px));
+  }
+  .head-brand {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink);
+    text-decoration: none;
+  }
+  .head-brand span { color: var(--muted); }
+  .head-state {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--warn);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 3px 8px;
+    white-space: nowrap;
+  }
+
+  .shell {
+    max-width: 1180px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: 196px minmax(0, 1fr);
+    gap: 64px;
+    padding-block: 44px 96px;
+    padding-left: max(20px, env(safe-area-inset-left, 0px));
+    padding-right: max(20px, env(safe-area-inset-right, 0px));
+  }
+
+  .toc {
+    position: sticky;
+    top: calc(env(safe-area-inset-top, 0px) + 76px);
+    align-self: start;
+    max-height: calc(100dvh - 120px);
+    overflow: auto;
+  }
+  .toc h2 {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 12px;
+  }
+  .toc ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+  .toc a {
+    display: block;
+    padding: 5px 10px 5px 12px;
+    border-left: 2px solid transparent;
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 13.5px;
+    line-height: 1.4;
+  }
+  .toc a:hover { color: var(--ink); }
+  .toc a[aria-current="true"] {
+    color: var(--accent);
+    border-left-color: var(--accent);
+    background: var(--accent-soft);
+  }
+
+  .content { min-width: 0; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 14px;
+  }
+  h1 {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: clamp(32px, 4.4vw, 46px);
+    line-height: 1.08;
+    letter-spacing: -0.015em;
+    margin: 0 0 18px;
+    text-wrap: balance;
+  }
+  .meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 18px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--muted);
+    padding-bottom: 22px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 26px;
+  }
+  .meta-row b { font-weight: 500; color: var(--ink); }
+
+  .lead {
+    font-size: 17.5px;
+    line-height: 1.62;
+    max-width: 70ch;
+    margin: 0 0 18px;
+  }
+
+  h2 {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: clamp(23px, 2.7vw, 29px);
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+    margin: 68px 0 16px;
+    text-wrap: balance;
+  }
+  h2 .num {
+    display: block;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    color: var(--accent);
+    margin-bottom: 8px;
+  }
+  h3 {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 16.5px;
+    line-height: 1.35;
+    margin: 34px 0 10px;
+  }
+  p { max-width: 72ch; margin: 0 0 16px; }
+  ul, ol { max-width: 72ch; padding-left: 1.15em; margin: 0 0 18px; }
+  li { margin-bottom: 7px; }
+  li::marker { color: var(--muted); }
+  strong { font-weight: 600; }
+
+  code {
+    font-family: var(--mono);
+    font-size: 0.88em;
+    background: var(--surface-2);
+    border-radius: 3px;
+    padding: 1px 4px;
+  }
+  pre {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.65;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 18px 20px;
+    overflow-x: auto;
+    margin: 0 0 22px;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; border-radius: 0; }
+
+  .table-wrap { overflow-x: auto; margin: 0 0 22px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th {
+    text-align: left;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 0 16px 9px 0;
+    border-bottom: 1px solid var(--muted);
+    white-space: nowrap;
+  }
+  td {
+    padding: 11px 16px 11px 0;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+  }
+  td:last-child, th:last-child { padding-right: 0; }
+  td.num {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .wide { min-width: 560px; }
+
+  .pill {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+  .pill.ok { color: var(--accent); background: var(--accent-soft); }
+  .pill.warn { color: var(--warn); background: var(--warn-soft); }
+  .pill.bad { color: var(--danger); background: var(--danger-soft); }
+
+  /* Constraints strip: status is the first thing scanned. */
+  .constraints { border-top: 1px solid var(--line); margin: 30px 0 10px; }
+  .constraint {
+    display: grid;
+    grid-template-columns: 148px 172px minmax(0, 1fr);
+    gap: 20px;
+    align-items: baseline;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .c-name { font-weight: 600; font-size: 14.5px; }
+  .c-note { font-size: 14px; color: var(--muted); margin: 0; line-height: 1.55; }
+
+  .figure { margin: 30px 0 34px; }
+  .fig-frame {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px;
+    overflow-x: auto;
+  }
+  .diagram { width: 100%; min-width: 620px; height: auto; display: block; }
+  .dg-frame { fill: none; stroke: var(--line); stroke-dasharray: 4 4; }
+  .dg-box { fill: var(--paper); stroke: var(--muted); stroke-width: 1; }
+  .dg-box-soft { fill: var(--surface-2); stroke: var(--line); stroke-width: 1; }
+  .dg-dash { stroke-dasharray: 4 3; }
+  .dg-line { fill: none; stroke: var(--muted); stroke-width: 1.2; }
+  .dg-head { fill: var(--muted); }
+  .dg-text { fill: var(--ink); font-family: var(--mono); }
+  .dg-muted { fill: var(--muted); font-family: var(--mono); }
+  .dg-label { fill: var(--muted); font-family: var(--mono); letter-spacing: 1.2px; }
+  .dg-strong { fill: var(--ink); font-family: var(--sans); font-weight: 600; }
+  figcaption {
+    font-size: 13px;
+    color: var(--muted);
+    max-width: 74ch;
+    margin-top: 12px;
+    line-height: 1.55;
+  }
+  figcaption .fig-no {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-right: 8px;
+  }
+
+  .formula {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 8px 8px 0;
+    padding: 18px 22px;
+    margin: 0 0 20px;
+    overflow-x: auto;
+  }
+  .formula pre {
+    border: 0;
+    background: none;
+    padding: 0;
+    margin: 0;
+    font-size: 13px;
+  }
+  .formula .note {
+    font-size: 12.5px;
+    color: var(--muted);
+    margin: 12px 0 0;
+    max-width: 64ch;
+  }
+
+  .track {
+    display: block;
+    width: 120px;
+    height: 6px;
+    background: var(--surface-2);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .track > span { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+
+  .callout {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 0 0 22px;
+  }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout .kicker {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 6px;
+  }
+
+  .split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px; }
+  .split > div { min-width: 0; }
+
+  footer {
+    margin-top: 72px;
+    padding-top: 22px;
+    border-top: 1px solid var(--line);
+    font-size: 13px;
+    color: var(--muted);
+  }
+  footer p { max-width: 74ch; margin: 0 0 8px; }
+  footer code { font-size: 12px; }
+
+  @media (max-width: 960px) {
+    .shell { grid-template-columns: 1fr; gap: 26px; padding-block: 24px 64px; }
+    .toc {
+      position: static;
+      max-height: none;
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+    .toc h2 { display: none; }
+    .toc ol { display: flex; gap: 6px; }
+    .toc a {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 5px 11px;
+      white-space: nowrap;
+      font-size: 12.5px;
+    }
+    .toc a[aria-current="true"] { border-color: var(--accent); }
+    h2 { margin-top: 52px; }
+    .split { grid-template-columns: 1fr; gap: 6px; }
+  }
+  @media (max-width: 620px) {
+    body { font-size: 15.5px; }
+    .constraint { grid-template-columns: 1fr; gap: 6px; padding: 16px 0; }
+    .c-note { font-size: 13.5px; }
+    .head-brand span { display: none; }
+    .diagram { min-width: 560px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="site-head">
+  <div class="head-inner">
+    <a class="head-brand" href="#top">TrendScope AI <span>/ architecture</span></a>
+    <span class="head-state">Proposed · v1.0</span>
+  </div>
+</header>
+
+<div class="shell" id="top">
+  <nav class="toc" aria-label="Sections">
+    <h2>Contents</h2>
+    <ol>
+      <li><a href="#overview" data-toc-link>01 · Overview</a></li>
+      <li><a href="#stack" data-toc-link>02 · Stack</a></li>
+      <li><a href="#layout" data-toc-link>03 · Repository</a></li>
+      <li><a href="#layers" data-toc-link>04 · Backend layers</a></li>
+      <li><a href="#connectors" data-toc-link>05 · Connectors</a></li>
+      <li><a href="#pipeline" data-toc-link>06 · Pipeline</a></li>
+      <li><a href="#growth" data-toc-link>07 · Growth rules</a></li>
+      <li><a href="#scoring" data-toc-link>08 · Scoring</a></li>
+      <li><a href="#profit" data-toc-link>09 · Profit and GST</a></li>
+      <li><a href="#ai" data-toc-link>10 · AI layer</a></li>
+      <li><a href="#cross-cutting" data-toc-link>11 · Cross-cutting</a></li>
+      <li><a href="#decisions" data-toc-link>12 · Scope</a></li>
+    </ol>
+  </nav>
+
+  <main class="content">
+    <p class="eyebrow">Technical architecture</p>
+    <h1>TrendScope AI</h1>
+    <div class="meta-row">
+      <span><b>Version</b> 1.0</span>
+      <span><b>Date</b> 7 November 2026</span>
+      <span><b>Market</b> Australia · AUD</span>
+      <span><b>Status</b> Proposed for Phase 1</span>
+    </div>
+
+    <p class="lead">A product intelligence platform whose numbers have to survive scrutiny. The architecture is shaped less by feature count than by three rules: never present an estimate as a sale, never let a missing measurement read as a decline, and never let one dead provider stop a run.</p>
+    <p>The repository is empty. This is a greenfield build against the PRD's prescribed stack (Next.js, FastAPI, PostgreSQL, Celery, Redis, Docker Compose), with the additions needed to keep scores explainable and historical data intact.</p>
+
+    <h2 id="constraints"><span class="num">Constraints</span>What the data landscape forces</h2>
+    <p>Four of the PRD's providers cannot be integrated the way the document assumes. The product is designed for that rather than around it.</p>
+
+    <div class="constraints">
+      <div class="constraint">
+        <div class="c-name">Google Trends</div>
+        <div><span class="pill warn">Paid intermediary</span></div>
+        <p class="c-note">No public API. The official one is application-only alpha; <code>pytrends</code> was archived in April 2025. Phase 1 uses DataForSEO behind the connector interface, roughly US$38–165/month depending on cadence.</p>
+      </div>
+      <div class="constraint">
+        <div class="c-name">Amazon AU</div>
+        <div><span class="pill bad">Mock only</span></div>
+        <p class="c-note">PA-API 5.0 is being retired, has no bestseller endpoint, and no <code>amazon.com.au</code> domain. Keepa has no AU catalogue. There is no first-party route, so Amazon stays mock until a licensed vendor clears legal review.</p>
+      </div>
+      <div class="constraint">
+        <div class="c-name">TikTok</div>
+        <div><span class="pill bad">Blocked</span></div>
+        <p class="c-note">No public Creative Center API, the internal endpoint broke in October 2026, and the official Commercial Content API covers only EU/EEA/UK/CH. Social momentum is unavailable in Australia for now.</p>
+      </div>
+      <div class="constraint">
+        <div class="c-name">eBay AU</div>
+        <div><span class="pill warn">Listings only</span></div>
+        <p class="c-note">Browse API returns active listings, which covers competition and price. Sold data went with the Finding API in February 2025, and Marketplace Insights is closed to new users. The UI says "active listings", never "sales".</p>
+      </div>
+      <div class="constraint">
+        <div class="c-name">Exploding Topics</div>
+        <div><span class="pill warn">CSV first</span></div>
+        <p class="c-note">The API exists but needs a US$249 plan plus at least US$1,000/month for 1,000 requests. CSV export is available on the US$99 plan, so Phase 2 imports files rather than paying for calls.</p>
+      </div>
+    </div>
+
+    <h2 id="overview"><span class="num">01</span>Two paths, one database</h2>
+    <p>Reads and writes never share a route. Nightly ingestion appends raw observations for one provider at a time. A daily derive job turns those observations into dated snapshots. Every API request reads only the snapshots.</p>
+
+    <figure class="figure">
+      <div class="fig-frame">
+        <svg class="diagram" viewBox="0 0 880 560" role="img" aria-label="Ingestion writes raw trend observations for each provider into PostgreSQL. A daily derive job reads those observations and writes product_metrics and opportunity_scores snapshots. The API serves requests only from those snapshots.">
+          <defs>
+            <marker id="arrow" viewBox="0 0 8 8" refX="7.5" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+              <polygon class="dg-head" points="0 0, 8 4, 0 8"></polygon>
+            </marker>
+          </defs>
+
+          <!-- Band 1: ingest -->
+          <rect class="dg-frame" x="1" y="8" width="878" height="190" rx="12"></rect>
+          <text class="dg-label" x="20" y="31" font-size="10">1 · INGEST / PER PROVIDER, ISOLATED</text>
+          <text class="dg-muted" x="858" y="31" font-size="9.5" text-anchor="end">one provider failing never blocks another</text>
+
+          <rect class="dg-box" x="20" y="50" width="197" height="52" rx="7"></rect>
+          <text class="dg-strong" x="36" y="73" font-size="12.5">Google Trends</text>
+          <text class="dg-muted" x="36" y="89" font-size="10.5">paid intermediary · AU</text>
+
+          <rect class="dg-box" x="233" y="50" width="197" height="52" rx="7"></rect>
+          <text class="dg-strong" x="249" y="73" font-size="12.5">CSV / manual</text>
+          <text class="dg-muted" x="249" y="89" font-size="10.5">user research import</text>
+
+          <rect class="dg-box dg-dash" x="446" y="50" width="197" height="52" rx="7"></rect>
+          <text class="dg-strong" x="462" y="73" font-size="12.5">eBay AU</text>
+          <text class="dg-muted" x="462" y="89" font-size="10.5">active listings · Phase 2</text>
+
+          <rect class="dg-box dg-dash" x="659" y="50" width="197" height="52" rx="7"></rect>
+          <text class="dg-strong" x="675" y="73" font-size="12.5">Mock</text>
+          <text class="dg-muted" x="675" y="89" font-size="10.5">synthetic, labelled</text>
+
+          <path class="dg-line" d="M440 102 V124" marker-end="url(#arrow)"></path>
+          <text class="dg-muted" x="452" y="117" font-size="10">validate · normalise · match</text>
+
+          <rect class="dg-box-soft" x="20" y="126" width="838" height="46" rx="7"></rect>
+          <text class="dg-strong" x="36" y="147" font-size="12.5">Connector framework</text>
+          <text class="dg-muted" x="36" y="163" font-size="10.5">rate limit · retry + jitter · circuit breaker · provenance</text>
+
+          <path class="dg-line" d="M440 172 V192" marker-end="url(#arrow)"></path>
+          <text class="dg-muted" x="452" y="187" font-size="10">insert-only batches</text>
+
+          <!-- Band 2: derive -->
+          <rect class="dg-frame" x="1" y="214" width="878" height="214" rx="12"></rect>
+          <text class="dg-label" x="20" y="237" font-size="10">2 · DERIVE / DAILY, IDEMPOTENT PER DATE</text>
+
+          <rect class="dg-box" x="20" y="246" width="838" height="48" rx="7"></rect>
+          <text class="dg-strong" x="36" y="268" font-size="12.5">trend_observations</text>
+          <text class="dg-muted" x="36" y="285" font-size="10.5">append-only · idempotent on (product, source, date, metric, granularity, country)</text>
+
+          <path class="dg-line" d="M440 294 V312" marker-end="url(#arrow)"></path>
+
+          <rect class="dg-box-soft" x="20" y="314" width="600" height="50" rx="7"></rect>
+          <text class="dg-strong" x="36" y="336" font-size="12.5">Daily derive job</text>
+          <text class="dg-muted" x="36" y="353" font-size="10.5">metrics · competition · margin · score</text>
+
+          <rect class="dg-box" x="668" y="314" width="190" height="50" rx="7"></rect>
+          <text class="dg-strong" x="684" y="333" font-size="12">Celery beat</text>
+          <text class="dg-muted" x="684" y="350" font-size="10.5">02:00 Australia/Sydney</text>
+
+          <path class="dg-line" d="M668 339 H624" marker-end="url(#arrow)"></path>
+
+          <path class="dg-line" d="M320 364 V369"></path>
+          <path class="dg-line" d="M225 369 H653"></path>
+          <path class="dg-line" d="M225 369 V374" marker-end="url(#arrow)"></path>
+          <path class="dg-line" d="M653 369 V374" marker-end="url(#arrow)"></path>
+
+          <rect class="dg-box" x="20" y="376" width="410" height="44" rx="7"></rect>
+          <text class="dg-strong" x="36" y="396" font-size="12.5">product_metrics</text>
+          <text class="dg-muted" x="36" y="411" font-size="10.5">7/30/90 growth · coverage · competition</text>
+
+          <rect class="dg-box" x="448" y="376" width="410" height="44" rx="7"></rect>
+          <text class="dg-strong" x="464" y="396" font-size="12.5">opportunity_scores</text>
+          <text class="dg-muted" x="464" y="411" font-size="10.5">score · components · confidence</text>
+
+          <!-- Band 3: serve -->
+          <rect class="dg-frame" x="1" y="444" width="878" height="104" rx="12"></rect>
+          <text class="dg-label" x="20" y="467" font-size="10">3 · SERVE / SNAPSHOT READS ONLY</text>
+          <text class="dg-muted" x="858" y="467" font-size="9.5" text-anchor="end">no request aggregates history</text>
+
+          <path class="dg-line" d="M440 420 V476" marker-end="url(#arrow)"></path>
+          <text class="dg-muted" x="452" y="440" font-size="10">indexed reads</text>
+
+          <rect class="dg-box" x="20" y="478" width="370" height="50" rx="7"></rect>
+          <text class="dg-strong" x="36" y="500" font-size="12.5">FastAPI read models</text>
+          <text class="dg-muted" x="36" y="517" font-size="10.5">filters · sorts · pagination · ETag</text>
+
+          <rect class="dg-box" x="510" y="478" width="350" height="50" rx="7"></rect>
+          <text class="dg-strong" x="526" y="500" font-size="12.5">Next.js UI</text>
+          <text class="dg-muted" x="526" y="517" font-size="10.5">dashboard · explorer · product detail</text>
+
+          <path class="dg-line" d="M390 502 H506" marker-end="url(#arrow)"></path>
+          <text class="dg-muted" x="448" y="492" font-size="9.5" text-anchor="middle">REST /api/v1</text>
+        </svg>
+      </div>
+      <figcaption><span class="fig-no">Figure 1</span>Nightly ingestion writes only to raw observations. A daily job derives every snapshot the API reads, so no request ever aggregates history, and a re-run for any date reproduces the same values from the same inputs.</figcaption>
+    </figure>
+
+    <p>Three boundaries carry most of the design. Raw observations and derived values are separate tables, so scores can be recomputed without touching evidence. Providers are isolated behind a lock and a circuit breaker, so a failing API degrades one source rather than the pipeline. Synthetically generated data is flagged at the observation level and travels into every score, so a demo cannot be mistaken for market data.</p>
+
+    <h2 id="stack"><span class="num">02</span>Stack</h2>
+    <div class="table-wrap">
+      <table class="wide">
+        <thead>
+          <tr><th>Layer</th><th>Choice</th><th>Note</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Frontend</td><td>Next.js 15, React 19, TypeScript, Tailwind, Recharts</td><td>App Router; server components for read-heavy pages</td></tr>
+          <tr><td>Backend</td><td>Python 3.12, FastAPI, Pydantic v2, SQLAlchemy 2.0</td><td>Async SQLAlchemy over <code>asyncpg</code></td></tr>
+          <tr><td>Database</td><td>PostgreSQL 16</td><td><code>pg_trgm</code> now; <code>pgvector</code> behind a flag</td></tr>
+          <tr><td>Queue</td><td>Celery 5, Redis 7</td><td>Beat timezone <code>Australia/Sydney</code></td></tr>
+          <tr><td>AI</td><td>OpenAI API behind an internal provider interface</td><td>Model is configuration, not code</td></tr>
+          <tr><td>Infrastructure</td><td>Docker Compose, Alembic, structlog, pytest</td><td>Local first, cloud-ready</td></tr>
+          <tr><td>Exports</td><td><code>openpyxl</code>, WeasyPrint, stdlib <code>csv</code></td><td>CSV and XLSX at MVP; PDF optional</td></tr>
+          <tr><td>Auth</td><td>Argon2id, short-lived JWT, rotating refresh token</td><td>15-minute access, 7-day refresh</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="layout"><span class="num">03</span>Repository layout</h2>
+    <p>One repository, two applications, one compose file. Backend modules are grouped by responsibility rather than by feature, because the pipeline cuts across every product category.</p>
+    <pre><code>TrendScope/
+├── backend/
+│   ├── app/
+│   │   ├── main.py            FastAPI factory, lifespan, middleware
+│   │   ├── core/              config, security, logging, errors
+│   │   ├── api/v1/            routers only, no business logic
+│   │   ├── schemas/           Pydantic request and response models
+│   │   ├── models/            SQLAlchemy 2.0 ORM
+│   │   ├── repositories/      typed queries, pagination
+│   │   ├── services/          scoring, metrics, competition, profit
+│   │   ├── connectors/        one package per provider
+│   │   ├── pipeline/          ingest, normalise, match, derive, score
+│   │   ├── jobs/              Celery app, tasks, beat schedule
+│   │   ├── ai/                provider, tools, assistant
+│   │   ├── reports/           builders and renderers
+│   │   └── seed/              categories, profile, demo data
+│   ├── alembic/
+│   └── tests/                 unit · integration · contract · fixtures
+├── frontend/
+│   └── src/                   app · components · lib · hooks
+├── docker-compose.yml
+├── .env.example
+└── docs/</code></pre>
+
+    <h2 id="layers"><span class="num">04</span>Backend layers</h2>
+    <p>Dependencies point one way. A router may call a service; a service may call repositories and connectors; a connector may not import models or settings. Domain rules live in services and are pure functions where possible, which is what makes the scoring and GST tests exhaustive instead of illustrative.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Module</th><th>Responsibility</th></tr></thead>
+        <tbody>
+          <tr><td><code>api/v1</code></td><td>Validate input, call one service, return a schema. Roughly fifteen lines per handler.</td></tr>
+          <tr><td><code>services</code></td><td>Business rules. Scoring, growth, competition and profitability are pure and DB-free.</td></tr>
+          <tr><td><code>repositories</code></td><td>Query construction, filters, pagination. No HTTP, no scoring.</td></tr>
+          <tr><td><code>connectors</code></td><td>Provider adapters. Receive credentials in a context object; never read settings or the database.</td></tr>
+          <tr><td><code>pipeline</code></td><td>Stages with explicit transaction boundaries and idempotency keys.</td></tr>
+          <tr><td><code>jobs</code></td><td>Celery tasks that call services. No domain logic of their own.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="connectors"><span class="num">05</span>Connector framework</h2>
+    <p>Every provider implements the same three methods. A connector returns observations, never scores, so switching from one Trends vendor to another is a new class and a new registry key, not a pipeline change.</p>
+    <pre><code>class Connector(Protocol):
+    provider_key: ClassVar[str]
+    source_type: ClassVar[SourceType]
+
+    async def health_check(self, ctx) -&gt; HealthResult: ...
+    async def discover(self, ctx, query) -&gt; AsyncIterator[ProductCandidate]: ...
+    async def fetch(self, ctx, targets, window) -&gt; AsyncIterator[ObservationBatch]: ...</code></pre>
+
+    <div class="split">
+      <div>
+        <h3>Credential handling</h3>
+        <p>Secrets exist only as environment variables. <code>data_sources.secret_ref</code> stores the variable names, so the admin screen can say which are missing without ever serialising a value.</p>
+      </div>
+      <div>
+        <h3>Failure handling</h3>
+        <p>Retries with exponential backoff and jitter apply to 429 and 5xx only. Auth failures stop immediately with an actionable message. A circuit breaker skips a repeatedly failing provider and marks it degraded.</p>
+      </div>
+    </div>
+
+    <h3>Per-provider lifecycle</h3>
+    <ul>
+      <li><strong>Enable or disable</strong> without deleting history. The source row stays, the scheduler skips it.</li>
+      <li><strong>Rate limit</strong> with a Redis token bucket sized per provider, not per process.</li>
+      <li><strong>Incremental sync</strong> using the stored cursor where a provider supports it; otherwise re-fetch the window and upsert on the natural key.</li>
+      <li><strong>Run bookkeeping</strong> in <code>ingestion_runs</code>: fetched, written, rejected, errors, cursor, timestamps.</li>
+      <li><strong>Raw payload retention</strong> for 90 days in <code>source_records</code>, enough to debug or replay an ingestion.</li>
+      <li><strong>Synthetic labelling</strong> at the source row, denormalised onto every observation and score it produces.</li>
+    </ul>
+
+    <h2 id="pipeline"><span class="num">06</span>Pipeline</h2>
+    <div class="table-wrap">
+      <table class="wide">
+        <thead><tr><th>Stage</th><th>Does</th><th>On failure</th></tr></thead>
+        <tbody>
+          <tr><td>Fetch</td><td>Calls one provider within its rate limit and timeout</td><td>Retry, then mark the run <code>partial</code>; other providers continue</td></tr>
+          <tr><td>Validate</td><td>Checks units, currency, dates, required fields</td><td>Rejects individual records and counts them; the batch survives</td></tr>
+          <tr><td>Normalise</td><td>Cleans titles, maps taxonomy, parses units</td><td>Unmapped category falls back to <code>uncategorised</code> with a confidence flag</td></tr>
+          <tr><td>Match</td><td>Identifier, then alias, then trigram similarity</td><td>Ambiguous pairs queue for review; nothing is auto-merged on a guess</td></tr>
+          <tr><td>Persist</td><td>Appends observations in batches of 500</td><td>Transaction rolls back that batch; the run records the offset</td></tr>
+          <tr><td>Derive</td><td>Metrics, competition, margin, score for the date</td><td>Idempotent, so the job is simply re-run</td></tr>
+          <tr><td>Serve</td><td>Snapshots, cached dashboard, reports</td><td>Cache miss falls through to the snapshot table</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="growth"><span class="num">07</span>Growth rules</h2>
+    <p>Growth compares two complete windows, ending yesterday. Today is excluded so a partial day never reads as a collapse. The formula is the PRD's:</p>
+    <div class="formula">
+      <pre><code>growth_pct = (mean(current_window) / mean(previous_window) - 1) × 100</code></pre>
+      <p class="note">Each window must contain at least 70% of its days. When it cannot be computed honestly, the value is <code>null</code> with a reason code, never zero.</p>
+    </div>
+    <div class="table-wrap">
+      <table class="wide">
+        <thead><tr><th>Condition</th><th>Stored result</th></tr></thead>
+        <tbody>
+          <tr><td>Fewer than 5 of 7 days in either window</td><td><code>null</code> · <code>insufficient_current_data</code></td></tr>
+          <tr><td>Baseline mean below 5.0 index points</td><td><code>null</code> · <code>insufficient_baseline</code></td></tr>
+          <tr><td>Baseline mean is exactly zero</td><td><code>null</code> · <code>zero_baseline</code></td></tr>
+          <tr><td>Latest observation older than 3 days</td><td><code>null</code> · <code>stale_data</code></td></tr>
+          <tr><td>Computed growth above 900%</td><td>Raw value kept · <code>extreme_growth</code> flag</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Trends values are normalised per request window, so the connector records the window it asked for. Growth is only computed inside a consistently scaled series, which is the subtlest correctness trap in the system and gets its own test.</p>
+
+    <h3>Competition</h3>
+    <p>Active listing count, Australian retailer count, price dispersion, review concentration (HHI over the top ten listings) and brand dominance each normalise to 0–100. Fewer than two available inputs yields <code>unknown</code>, not "low": a thin index is not evidence of an open market.</p>
+
+    <h2 id="scoring"><span class="num">08</span>Scoring</h2>
+    <p>Six components, one hundred points, and a rule that missing evidence is excluded rather than scored zero.</p>
+    <div class="table-wrap">
+      <table class="wide">
+        <thead><tr><th>Component</th><th>Weight</th><th></th><th>Basis</th></tr></thead>
+        <tbody>
+          <tr><td>Demand</td><td class="num">25%</td><td><span class="track"><span style="width:100%"></span></span></td><td>30-day growth, 7-day momentum, index level</td></tr>
+          <tr><td>Marketplace</td><td class="num">25%</td><td><span class="track"><span style="width:100%"></span></span></td><td>Listing count, review velocity, rank movement</td></tr>
+          <tr><td>Social</td><td class="num">15%</td><td><span class="track"><span style="width:60%"></span></span></td><td>Engagement and hashtag views</td></tr>
+          <tr><td>Competition</td><td class="num">15%</td><td><span class="track"><span style="width:60%"></span></span></td><td>100 minus the competition index</td></tr>
+          <tr><td>Profitability</td><td class="num">15%</td><td><span class="track"><span style="width:60%"></span></span></td><td>Contribution margin at the reference price</td></tr>
+          <tr><td>Seasonal</td><td class="num">5%</td><td><span class="track"><span style="width:20%"></span></span></td><td>Seasonality index over the next 90 days</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:12.5px;color:var(--muted);margin-top:-10px;">Bars are scaled to the largest weight, not to 100 points.</p>
+
+    <div class="formula">
+      <pre><code>weight_available = Σ wᵢ            components with usable evidence
+score_raw        = Σ (wᵢ × sᵢ) / weight_available
+confidence       = coverage × freshness × sample × source diversity
+score            = 50 + (score_raw − 50) × confidence</code></pre>
+      <p class="note">Renormalising weights alone would let one perfect component turn 25% of the evidence into a score of 100. Shrinking toward 50 by confidence keeps the ranking honest, and both values are stored.</p>
+    </div>
+
+    <h3>Classification</h3>
+    <p>80–100 excellent, 65–79 strong, 50–64 worth investigating, 35–49 weak, 0–34 low priority. Below 60% coverage the classification becomes <code>insufficient_data</code> regardless of the number, and the UI shows "not enough data to rank" instead of a badge. Every score row stores its component scores, raw inputs, weights snapshot and coverage, so any ranking can be explained a year later.</p>
+
+    <h2 id="profit"><span class="num">09</span>Profit and GST</h2>
+    <p>The calculator is a pure function over decimals, tested against worked examples to the cent.</p>
+    <ul>
+      <li>Consumer prices are GST-inclusive, so <code>price_ex_gst = price_inc_gst / 1.1</code>.</li>
+      <li>When the supplier charges Australian GST and the business is registered, that GST is an input tax credit. It is excluded from the economic cost and still shown in the cash landed cost.</li>
+      <li>Import duty is a real cost, not recoverable, and is configurable per scenario.</li>
+      <li>Payment fees apply to the GST-inclusive amount. Contribution margin is measured after fees, fulfilment, packaging and acquisition cost.</li>
+      <li>Outputs include break-even ad cost and profit at 100, 500, 1,000 and 5,000 orders per month.</li>
+    </ul>
+
+    <h2 id="ai"><span class="num">10</span>AI layer</h2>
+    <p>Phase 4, but the interface is fixed now so the retrieval surface exists before the model does. The assistant reaches data only through tools that wrap the same services the API uses: search products, read a series, compare products, read competition, list suppliers, calculate profit, read a report.</p>
+    <p>Answers are structured claims, not prose alone. Each claim carries an evidence type: <strong>verified</strong>, <strong>estimated</strong>, <strong>model_generated</strong> or <strong>unavailable</strong>. A verified claim must resolve to a stored observation, score or report id; the validator rejects an answer that cites nothing. Product titles arriving from a provider are treated as data, never as instructions.</p>
+
+    <h2 id="cross-cutting"><span class="num">11</span>Cross-cutting</h2>
+    <div class="table-wrap">
+      <table class="wide">
+        <thead><tr><th>Concern</th><th>Decision</th></tr></thead>
+        <tbody>
+          <tr><td>Config</td><td>pydantic-settings from environment. No module reads <code>os.environ</code> directly.</td></tr>
+          <tr><td>Errors</td><td>Typed domain errors become one JSON envelope with a code and request id. No stack traces to clients.</td></tr>
+          <tr><td>Auth</td><td>Argon2id, access JWT, rotating refresh token in an httpOnly cookie.</td></tr>
+          <tr><td>Roles</td><td><code>admin</code>, <code>analyst</code>, <code>viewer</code>. Score weights and provider config are admin-only.</td></tr>
+          <tr><td>Audit</td><td>Every mutation writes actor, entity, diff and request id.</td></tr>
+          <tr><td>Caching</td><td>Redis: dashboard 60 seconds, product detail 30 seconds with ETag, invalidated by recalculation.</td></tr>
+          <tr><td>Time</td><td>UTC in storage, <code>Australia/Sydney</code> for schedules and display.</td></tr>
+          <tr><td>Uploads</td><td>CSV capped at 10 MB, streamed, row-level error report; no formula injection into exports.</td></tr>
+          <tr><td>Compliance</td><td>Authorised APIs only. No scraping, no CAPTCHA bypass, no anti-bot circumvention.</td></tr>
+          <tr><td>Migrations</td><td>Alembic, one head, applied at deploy start; seeders idempotent.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2 id="decisions"><span class="num">12</span>Scope and open decisions</h2>
+    <p>Phase 1 delivers Google Trends through a paid connector, CSV and manual import, the metric and scoring engines, dashboard, product pages, watchlist and weekly CSV report. Amazon, TikTok and supplier connectors are explicitly out of scope until their access questions are answered.</p>
+
+    <div class="table-wrap">
+      <table class="wide">
+        <thead><tr><th>Decision</th><th>Recommendation</th><th>Blocks</th></tr></thead>
+        <tbody>
+          <tr><td>Trends data route</td><td>DataForSEO weekly at MVP, about US$38/month for 500 products</td><td>Milestone 4</td></tr>
+          <tr><td>Amazon strategy</td><td>Mock only until a licensed vendor clears legal review</td><td>Phase 2</td></tr>
+          <tr><td>Tenancy</td><td>Single tenant, multiple users with roles; schema already carries user ids</td><td>Milestone 2</td></tr>
+          <tr><td>Demo data</td><td>Labelled synthetic dataset, purgeable with one command</td><td>Milestone 0</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout">
+      <p class="kicker">Not in the MVP</p>
+      <p>No scraping or anti-bot circumvention. No claimed sales volumes. No Amazon or TikTok live data. No multi-country interface beyond a wired filter. No semantic matching, anomaly detection or forecasting. No catalogue publishing or store write-back.</p>
+    </div>
+
+    <footer>
+      <p>Companion documents in the repository: <code>docs/01-architecture.md</code>, <code>docs/02-database-erd.md</code>, <code>docs/03-api-contract.md</code>, <code>docs/04-data-source-assessment.md</code>, <code>docs/05-implementation-plan.md</code>.</p>
+      <p>No application code has been written. Phase 1 estimate: 24–32 engineer-days, gated on the open decisions above.</p>
+    </footer>
+  </main>
+</div>
+
+<script>
+  (function () {
+    var links = Array.prototype.slice.call(document.querySelectorAll("[data-toc-link]"));
+    var targets = links.map(function (l) {
+      return document.querySelector(l.getAttribute("href"));
+    });
+    var ticking = false;
+
+    function setActive(index) {
+      links.forEach(function (l, i) {
+        if (i === index) { l.setAttribute("aria-current", "true"); }
+        else { l.removeAttribute("aria-current"); }
+      });
+    }
+
+    function update() {
+      var y = window.scrollY + 110;
+      var current = 0;
+      for (var i = 0; i < targets.length; i++) {
+        var t = targets[i];
+        if (!t) continue;
+        if (t.getBoundingClientRect().top + window.scrollY <= y) current = i;
+      }
+      setActive(current);
+    }
+
+    window.addEventListener("scroll", function () {
+      if (!ticking) {
+        ticking = true;
+        window.requestAnimationFrame(function () { update(); ticking = false; });
+      }
+    }, { passive: true });
+
+    update();
+  })();
+</script>
+</body>
+</html>

@@ -1,0 +1,72 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import date, datetime
+
+
+@dataclass(frozen=True)
+class ProductCandidate:
+    external_id: str
+    name: str
+    category_slug: str
+    brand: str | None
+    price: float | None
+    description: str | None
+    keywords: list[str] = field(default_factory=list)
+    is_synthetic: bool = True
+    first_seen_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class ObservationPoint:
+    external_id: str
+    observation_date: date
+    metric_name: str
+    metric_value: float
+    unit: str
+    granularity: str = "daily"
+    confidence: float = 1.0
+    meta: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ListingRecord:
+    external_id: str
+    marketplace: str
+    listing_id: str
+    title: str
+    seller_name: str
+    price: float
+    rating: float
+    review_count: int
+    listing_url: str = ""
+
+
+@dataclass(frozen=True)
+class SupplierRecord:
+    supplier_name: str
+    platform_key: str
+    country: str
+    rating: float
+    url: str = ""
+
+
+@dataclass(frozen=True)
+class SupplierOfferRecord:
+    external_id: str
+    supplier_name: str
+    external_product_id: str
+    product_cost: float
+    shipping_cost: float
+    minimum_order_quantity: int
+    lead_time_days: int
+    availability: str
+
+
+@dataclass
+class ConnectorDataset:
+    products: list[ProductCandidate] = field(default_factory=list)
+    observations: list[ObservationPoint] = field(default_factory=list)
+    listings: list[ListingRecord] = field(default_factory=list)
+    suppliers: list[SupplierRecord] = field(default_factory=list)
+    offers: list[SupplierOfferRecord] = field(default_factory=list)

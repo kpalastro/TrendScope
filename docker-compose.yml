@@ -1,0 +1,101 @@
+name: trendscope
+
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-trendscope}:${POSTGRES_PASSWORD:-trendscope}@db:5432/${POSTGRES_DB:-trendscope}
+  REDIS_URL: redis://redis:6379/0
+  SECRET_KEY: ${SECRET_KEY:-dev-secret-change-me}
+  ENVIRONMENT: ${ENVIRONMENT:-development}
+  AUTH_REQUIRED: "true"
+  ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@trendscope.app}
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
+  CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+  SEED_DEMO: "true"
+  AUTO_CREATE_TABLES: "true"
+  MOCK_PRODUCT_LIMIT: ${MOCK_PRODUCT_LIMIT:-48}
+  MOCK_HISTORY_DAYS: ${MOCK_HISTORY_DAYS:-400}
+  REPORTS_DIR: /app/reports
+  CELERY_ENABLED: "true"
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-trendscope}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trendscope}
+      POSTGRES_DB: ${POSTGRES_DB:-trendscope}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-trendscope} -d ${POSTGRES_DB:-trendscope}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+    environment: *backend-env
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        alembic upgrade head
+        python -m app.cli init --demo
+        exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+    environment: *backend-env
+    command: ["celery", "-A", "app.jobs.celery_app.celery_app", "worker", "--loglevel=info"]
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  beat:
+    build:
+      context: ./backend
+    environment: *backend-env
+    command: ["celery", "-A", "app.jobs.celery_app.celery_app", "beat", "--loglevel=info"]
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        API_INTERNAL_URL: http://backend:8000
+    environment:
+      API_INTERNAL_URL: http://backend:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
