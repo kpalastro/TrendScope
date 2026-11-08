@@ -530,7 +530,18 @@ def _observation_payload(observation: TrendObservation) -> dict:
         "confidence": round(float(observation.confidence), 3),
         "is_synthetic": bool(observation.is_synthetic),
         "collected_at": observation.collected_at,
+        "revision": int(observation.revision or 1),
+        "updated_at": observation.updated_at,
         "notes": (observation.meta or {}).get("notes"),
+        "attribution": {
+            "provider_name": observation.provider_name,
+            "source_url": observation.source_url,
+            "collected_at": observation.collected_at,
+            "verification_status": observation.verification_status,
+            "data_quality": observation.data_quality,
+            "is_synthetic": bool(observation.is_synthetic),
+            "revision": int(observation.revision or 1),
+        },
     }
 
 

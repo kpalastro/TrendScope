@@ -21,8 +21,15 @@ import {
 } from "@/components/ui";
 import { api } from "@/lib/api";
 import { useApi } from "@/lib/useApi";
-import type { IngestionRun, ScoringProfile, SourceStatus } from "@/lib/types";
-import { COMPONENT_LABEL, formatDateTime, money, relativeDays, titleCase } from "@/lib/format";
+import type {
+  IngestionRun,
+  ProviderHealthCheck,
+  ProviderHealthSummary,
+  ProviderSnapshot,
+  ScoringProfile,
+  SourceStatus,
+} from "@/lib/types";
+import { COMPONENT_LABEL, formatDate, formatDateTime, money, relativeDays, titleCase } from "@/lib/format";
 
 const STATUS_ICON: Record<string, typeof CheckCircle2> = {
   idle: CircleSlash,
@@ -78,6 +85,12 @@ export default function SourcesPage() {
   const runs = useApi<{ data: IngestionRun[]; meta: { page: number; per_page: number } }>(
     activeId ? `/data-sources/${activeId}/runs?per_page=10` : null,
   );
+  const health = useApi<{ summary: ProviderHealthSummary; checks: ProviderHealthCheck[] }>(
+    activeId ? `/data-sources/${activeId}/health?limit=10` : null,
+  );
+  const snapshots = useApi<{ data: ProviderSnapshot[]; meta: { count: number; limit: number } }>(
+    activeId ? `/data-sources/${activeId}/snapshots?limit=10` : null,
+  );
 
   async function sync(source: SourceStatus) {
     setBusyId(source.id);
@@ -88,11 +101,13 @@ export default function SourcesPage() {
       );
       const run = response.run;
       setNotice({
-        message: `Sync ${response.job.status}: ${run.records_fetched} fetched, ${run.records_written} written, ${run.records_rejected} rejected.`,
+        message: `Sync ${response.job.status}: ${run.records_fetched} fetched, ${run.records_written} written, ${run.records_updated} revised, ${run.records_rejected} rejected.`,
         tone: run.status === "success" ? "ok" : "error",
       });
       reload();
       runs.reload();
+      health.reload();
+      snapshots.reload();
     } catch (err) {
       setNotice({ message: (err as Error).message, tone: "error" });
     } finally {
@@ -109,22 +124,31 @@ export default function SourcesPage() {
     }
   }
 
-  async function testConnection(source: SourceStatus) {
+  async function checkHealth(source: SourceStatus) {
     setBusyId(source.id);
     setNotice(null);
+    const live =
+      source.configured && source.connector.installed && source.connector.available;
     try {
       const result = await api.post<{
-        state: string;
-        configured: boolean;
-        reason: string | null;
-        note: string;
-      }>(`/data-sources/${source.id}/test-connection`);
+        check: {
+          status: string;
+          ok: boolean;
+          live: boolean;
+          latency_ms: number | null;
+          message: string | null;
+        };
+      }>(`/data-sources/${source.id}/health-check?live=${live}`);
+      const check = result.check;
       setNotice({
-        message: `${source.provider_name}: ${result.state}${
-          result.reason ? ` — ${result.reason}` : ""
-        }. ${result.note}`,
-        tone: result.configured ? "ok" : "error",
+        message: `${source.provider_name}: ${check.status}${
+          check.latency_ms === null ? "" : ` in ${check.latency_ms} ms`
+        }${check.live ? " (live provider call)" : " (configuration check)"}. ${
+          check.message ?? ""
+        }`,
+        tone: check.status === "healthy" || check.status === "manual" ? "ok" : "error",
       });
+      reload();
     } catch (err) {
       setNotice({ message: (err as Error).message, tone: "error" });
     } finally {
@@ -184,7 +208,9 @@ export default function SourcesPage() {
                         {source.enabled ? "enabled" : "disabled"}
                       </Pill>
                       <Pill tone={costTone(source.cost_model)}>{source.cost_model}</Pill>
-                      <Pill tone={healthTone(source.health)}>{source.health}</Pill>
+                      <Pill tone={healthTone(source.health === "unknown" ? source.health_status : source.health)}>
+                        {source.health === "unknown" ? source.health_status : source.health}
+                      </Pill>
                       {source.is_synthetic ? <Pill tone="amber">synthetic</Pill> : null}
                       {!source.configured ? <Pill tone="danger">not configured</Pill> : null}
                     </div>
@@ -232,6 +258,18 @@ export default function SourcesPage() {
                   <div>
                     <dt className="text-muted">Failures</dt>
                     <dd className="num">{source.consecutive_failures}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted">Last health check</dt>
+                    <dd>
+                      {source.last_health_check_at
+                        ? `${relativeDays(source.last_health_check_at)} · ${source.health_status}${
+                            source.last_health_latency_ms === null
+                              ? ""
+                              : ` · ${source.last_health_latency_ms} ms`
+                          }`
+                        : "never"}
+                    </dd>
                   </div>
                 </dl>
 
@@ -288,15 +326,15 @@ export default function SourcesPage() {
                         <button
                           type="button"
                           className="btn btn-sm"
-                          onClick={() => testConnection(source)}
+                          onClick={() => checkHealth(source)}
                           disabled={busyId === source.id || !source.connector.installed}
                           title={
                             source.connector.installed
-                              ? "Check credentials and configuration (no provider call)"
+                              ? "Record a health check (live provider call when configured)"
                               : "No connector plugin installed"
                           }
                         >
-                          Test
+                          Health
                         </button>
                         <button type="button" className="btn btn-sm" onClick={() => toggle(source)}>
                           {source.enabled ? "Disable" : "Enable"}
@@ -371,6 +409,7 @@ export default function SourcesPage() {
                   <th>Status</th>
                   <th className="text-right">Fetched</th>
                   <th className="text-right">Written</th>
+                  <th className="text-right">Revised</th>
                   <th className="text-right">Rejected</th>
                   <th className="text-right">Finished</th>
                 </tr>
@@ -385,6 +424,7 @@ export default function SourcesPage() {
                     </td>
                     <td className="num text-right text-xs">{run.records_fetched}</td>
                     <td className="num text-right text-xs">{run.records_written}</td>
+                    <td className="num text-right text-xs">{run.records_updated}</td>
                     <td className="num text-right text-xs">{run.records_rejected}</td>
                     <td className="whitespace-nowrap text-right text-xs text-muted">
                       {formatDateTime(run.finished_at)}
@@ -400,6 +440,150 @@ export default function SourcesPage() {
           </p>
         )}
       </Card>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card className="p-4">
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <h2 className="flex items-center gap-2 text-sm font-semibold tracking-tight">
+                <ShieldCheck className="h-4 w-4 text-accent" aria-hidden="true" /> Health history
+              </h2>
+              <p className="mt-0.5 text-xs text-muted">
+                A configuration check is local and free. A live check makes the cheapest
+                authenticated provider call and may consume a small quota.
+              </p>
+            </div>
+          </div>
+          {health.data ? (
+            <div className="mt-3 grid grid-cols-3 gap-2 rounded-md border border-line bg-raised px-3 py-2 text-xs">
+              <div>
+                <p className="eyebrow">Checks 24h</p>
+                <p className="num mt-0.5">{health.data.summary.checks_24h}</p>
+              </div>
+              <div>
+                <p className="eyebrow">Success</p>
+                <p className="num mt-0.5">
+                  {health.data.summary.success_rate_24h === null
+                    ? "—"
+                    : `${(health.data.summary.success_rate_24h * 100).toFixed(0)}%`}
+                </p>
+              </div>
+              <div>
+                <p className="eyebrow">Avg latency</p>
+                <p className="num mt-0.5">
+                  {health.data.summary.avg_latency_ms_24h === null
+                    ? "—"
+                    : `${health.data.summary.avg_latency_ms_24h} ms`}
+                </p>
+              </div>
+            </div>
+          ) : null}
+          {health.loading && !health.data ? (
+            <Skeleton className="mt-3 h-24" />
+          ) : health.data?.checks.length ? (
+            <div className="mt-3 overflow-x-auto">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Checked</th>
+                    <th>Kind</th>
+                    <th>Status</th>
+                    <th className="text-right">Latency</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {health.data.checks.map((check) => (
+                    <tr key={check.id}>
+                      <td className="whitespace-nowrap text-xs">
+                        {formatDateTime(check.checked_at)}
+                      </td>
+                      <td className="text-xs">{check.live ? "live" : "config"}</td>
+                      <td>
+                        <Pill tone={healthTone(check.status)}>{check.status}</Pill>
+                      </td>
+                      <td className="num text-right text-xs">
+                        {check.latency_ms === null ? "—" : `${check.latency_ms} ms`}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="mt-3 text-sm text-muted">
+              {health.error ?? "No health checks recorded for this source yet."}
+            </p>
+          )}
+        </Card>
+
+        <Card className="p-4">
+          <div>
+            <h2 className="flex items-center gap-2 text-sm font-semibold tracking-tight">
+              <Database className="h-4 w-4 text-accent" aria-hidden="true" /> Snapshot archive
+            </h2>
+            <p className="mt-0.5 text-xs text-muted">
+              Every sync archives the normalised provider payload. Observations are the current
+              view; a snapshot is the immutable evidence of what the provider returned.
+            </p>
+          </div>
+          {snapshots.loading && !snapshots.data ? (
+            <Skeleton className="mt-3 h-24" />
+          ) : snapshots.data?.data.length ? (
+            <div className="mt-3 overflow-x-auto">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Fetched</th>
+                    <th>Period</th>
+                    <th className="text-right">Records</th>
+                    <th>Checksum</th>
+                    <th>State</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {snapshots.data.data.map((snapshot) => (
+                    <tr key={snapshot.id}>
+                      <td className="whitespace-nowrap text-xs">
+                        {formatDateTime(snapshot.fetched_at)}
+                      </td>
+                      <td className="whitespace-nowrap text-xs text-muted">
+                        {snapshot.period_start
+                          ? `${formatDate(snapshot.period_start)}${
+                              snapshot.period_end
+                                ? ` – ${formatDate(snapshot.period_end)}`
+                                : ""
+                            }`
+                          : "—"}
+                      </td>
+                      <td className="num text-right text-xs">
+                        {snapshot.record_count}
+                        <span className="text-muted">
+                          {" "}
+                          ({snapshot.observation_count} obs · {snapshot.listing_count} listings)
+                        </span>
+                      </td>
+                      <td className="num text-xs" title={snapshot.checksum}>
+                        {snapshot.checksum.slice(0, 12)}…
+                      </td>
+                      <td>
+                        {snapshot.truncated ? (
+                          <Pill tone="amber">truncated</Pill>
+                        ) : (
+                          <Pill tone="good">complete</Pill>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="mt-3 text-sm text-muted">
+              {snapshots.error ?? "No snapshot archived for this source yet."}
+            </p>
+          )}
+        </Card>
+      </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card className="p-4">

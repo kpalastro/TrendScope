@@ -10,10 +10,11 @@ from app.api.deps import AdminUser, CurrentUser, DbSession, WriteUser
 from app.connectors.framework import ConnectorError, ConnectorUnavailable
 from app.connectors.registry import get_connector
 from app.core.errors import ApiError
-from app.models import DataSource, IngestionRun
+from app.models import DataSource, IngestionRun, ProviderSnapshot
 from app.schemas import SourcePatch
-from app.services import audit
+from app.services import audit, provider_health
 from app.services.ingestion import get_source, run_connector_sync, run_mock_sync
+from app.services.snapshots import latest_snapshots
 
 router = APIRouter(tags=["sources"])
 
@@ -99,6 +100,9 @@ def _source_payload(source: DataSource) -> dict:
         "last_success_at": source.last_success_at,
         "last_error": source.last_error,
         "consecutive_failures": source.consecutive_failures,
+        "health_status": source.health_status,
+        "last_health_check_at": source.last_health_check_at,
+        "last_health_latency_ms": source.last_health_latency_ms,
         "cost_model": source.cost_model,
         "monthly_cost": _money(source.monthly_cost),
         "cost_currency": source.cost_currency,
@@ -126,9 +130,11 @@ def _run_payload(run: IngestionRun) -> dict:
         "finished_at": run.finished_at,
         "records_fetched": run.records_fetched,
         "records_written": run.records_written,
+        "records_updated": run.records_updated,
         "records_rejected": run.records_rejected,
         "error_count": run.error_count,
         "error_summary": run.error_summary,
+        "cursor": run.cursor or {},
     }
 
 
@@ -159,6 +165,117 @@ def _job_payload(run: IngestionRun) -> dict:
 def list_sources(user: CurrentUser, db: DbSession) -> dict:
     sources = db.execute(select(DataSource).order_by(DataSource.provider_key)).scalars().all()
     return {"data": [_source_payload(source) for source in sources]}
+
+
+def _snapshot_payload(snapshot: ProviderSnapshot, *, include_payload: bool = False) -> dict:
+    payload = {
+        "id": snapshot.id,
+        "source_id": snapshot.source_id,
+        "ingestion_run_id": snapshot.ingestion_run_id,
+        "fetched_at": snapshot.fetched_at,
+        "period_start": snapshot.period_start,
+        "period_end": snapshot.period_end,
+        "record_count": snapshot.record_count,
+        "observation_count": snapshot.observation_count,
+        "listing_count": snapshot.listing_count,
+        "checksum": snapshot.checksum,
+        "truncated": snapshot.truncated,
+        "attribution": snapshot.attribution or {},
+    }
+    if include_payload:
+        payload["payload"] = snapshot.payload or {}
+    return payload
+
+
+@router.get("/data-sources/health")
+def health_overview(user: CurrentUser, db: DbSession) -> dict:
+    """Latest health for every source plus 24-hour check statistics."""
+    return provider_health.overall(db)
+
+
+@router.get("/data-sources/{source_id}/health")
+def source_health(
+    source_id: UUID,
+    user: CurrentUser,
+    db: DbSession,
+    limit: int = 20,
+) -> dict:
+    source = db.get(DataSource, source_id)
+    if source is None:
+        raise ApiError(404, "NOT_FOUND", "Data source not found.")
+    checks = provider_health.recent_checks(db, source.id, limit=limit)
+    return {
+        "summary": provider_health.summary(db, source),
+        "checks": [provider_health.check_payload(item) for item in checks],
+    }
+
+
+@router.post("/data-sources/{source_id}/health-check")
+def run_health_check(
+    source_id: UUID,
+    request: Request,
+    user: AdminUser,
+    db: DbSession,
+    live: bool = False,
+) -> dict:
+    """Record a health check.
+
+    ``live=false`` is a free local configuration check. ``live=true`` makes the
+    cheapest authenticated provider call the connector supports and may consume
+    a small amount of provider quota.
+    """
+    source = db.get(DataSource, source_id)
+    if source is None:
+        raise ApiError(404, "NOT_FOUND", "Data source not found.")
+    check = provider_health.evaluate(db, source, live=live)
+    audit.record(
+        db,
+        action="data_source.health_check",
+        entity_type="data_source",
+        entity_id=source.id,
+        user=user,
+        request=request,
+        changes={
+            "live": check.live,
+            "status": check.status,
+            "ok": check.ok,
+            "latency_ms": check.latency_ms,
+        },
+    )
+    return {
+        "check": provider_health.check_payload(check),
+        "summary": provider_health.summary(db, source),
+    }
+
+
+@router.get("/data-sources/{source_id}/snapshots")
+def source_snapshots(
+    source_id: UUID,
+    user: CurrentUser,
+    db: DbSession,
+    limit: int = 20,
+) -> dict:
+    source = db.get(DataSource, source_id)
+    if source is None:
+        raise ApiError(404, "NOT_FOUND", "Data source not found.")
+    rows = latest_snapshots(db, source.id, limit=limit)
+    return {
+        "data": [_snapshot_payload(row) for row in rows],
+        "meta": {"count": len(rows), "limit": max(1, min(limit, 100))},
+    }
+
+
+@router.get("/data-sources/{source_id}/snapshots/{snapshot_id}")
+def source_snapshot_detail(
+    source_id: UUID,
+    snapshot_id: UUID,
+    user: CurrentUser,
+    db: DbSession,
+) -> dict:
+    snapshot = db.get(ProviderSnapshot, snapshot_id)
+    if snapshot is None or snapshot.source_id != source_id:
+        raise ApiError(404, "NOT_FOUND", "Snapshot not found.")
+    return {"snapshot": _snapshot_payload(snapshot, include_payload=True)}
 
 
 @router.patch("/data-sources/{source_id}")

@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     celery_enabled: bool = True
 
+    # Connector history. Snapshots archive the normalised payload of each run;
+    # they are deliberately bounded so a large provider response cannot bloat
+    # the operational database.
+    snapshot_max_records: int = 5000
+    snapshot_retention_days: int = 180
+    connector_retry_attempts: int = 2
+    connector_retry_backoff_seconds: float = 2.0
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

@@ -57,7 +57,9 @@ additive.
 
 **Read path** (fast, no aggregation on request): product metrics are pre-computed daily into
 `product_metrics` and `opportunity_scores`. Explorer and dashboard queries read snapshots, not raw
-observations. Raw observation history stays append-only for recomputation and charts.
+observations. Observations keep a stable natural key for idempotent re-ingestion; a provider
+revision updates the current row, increments `revision` and retains earlier values, while
+`provider_snapshots` preserves the complete earlier payload for recomputation and audit.
 
 **Write path** (slow, isolated): connectors produce normalised observations; a per-source run is
 committed atomically; derived snapshots are recomputed by an idempotent job. A failing provider can
@@ -220,6 +222,8 @@ class BaseConnector:
 - Connectors return **observations, never scores**. Scoring is provider-agnostic.
 - `get_source_status` never calls the provider: it reports `available`, `requires_credentials`,
   `manual_fallback` or `unavailable` with a reason. `test-connection` checks the same state.
+- `health_check` records the same status in `provider_health_checks`; `live=true` delegates to the
+  connector's cheapest authenticated `probe`, while a configuration check makes no provider call.
 
 ### 6.2 Registry and lifecycle
 

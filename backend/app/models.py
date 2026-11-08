@@ -90,6 +90,14 @@ METRIC_TYPES = (
 )
 VERIFICATION_STATUSES = ("verified", "estimated", "unverified", "synthetic")
 DATA_QUALITY_LEVELS = ("high", "medium", "low", "unknown", "synthetic")
+HEALTH_STATUSES = (
+    "healthy",
+    "degraded",
+    "unavailable",
+    "unconfigured",
+    "manual",
+    "unknown",
+)
 
 # Deterministic product-identity keys and the merge-review queue. Identifiers
 # are what make deduplication safe: names are ambiguous, GTINs/ASINs are not.
@@ -192,6 +200,9 @@ class DataSource(Base):
     sync_status: Mapped[str] = mapped_column(String(20), default="never_run")
     last_error: Mapped[str | None] = mapped_column(Text)
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    health_status: Mapped[str] = mapped_column(String(20), default="unknown", nullable=False)
+    last_health_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_health_latency_ms: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
@@ -211,12 +222,75 @@ class IngestionRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     records_fetched: Mapped[int] = mapped_column(Integer, default=0)
     records_written: Mapped[int] = mapped_column(Integer, default=0)
+    records_updated: Mapped[int] = mapped_column(Integer, default=0)
     records_rejected: Mapped[int] = mapped_column(Integer, default=0)
     error_count: Mapped[int] = mapped_column(Integer, default=0)
     error_summary: Mapped[str | None] = mapped_column(Text)
     cursor: Mapped[dict | None] = mapped_column(JSON)
 
     __table_args__ = (Index("ix_runs_source_started", "source_id", "started_at"),)
+
+
+class ProviderHealthCheck(Base):
+    """A point-in-time provider health observation.
+
+    Checks are append-only so an operator can see whether a source is flapping,
+    and whether a failure was a credential/config problem or a live provider
+    call. ``live`` is False for local configuration checks.
+    """
+
+    __tablename__ = "provider_health_checks"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("data_sources.id", ondelete="CASCADE"), nullable=False
+    )
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    live: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="unknown", nullable=False)
+    ok: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    http_status: Mapped[int | None] = mapped_column(Integer)
+    message: Mapped[str | None] = mapped_column(Text)
+    details: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+
+    __table_args__ = (
+        Index("ix_health_source_checked", "source_id", "checked_at"),
+    )
+
+
+class ProviderSnapshot(Base):
+    """An immutable archive of one connector payload.
+
+    ``trend_observations`` is the query-optimised view; a snapshot preserves
+    exactly what the provider returned at collection time (counts, attribution,
+    normalised records) so a later correction cannot rewrite history.
+    """
+
+    __tablename__ = "provider_snapshots"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("data_sources.id", ondelete="CASCADE"), nullable=False
+    )
+    ingestion_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("ingestion_runs.id", ondelete="SET NULL")
+    )
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    period_start: Mapped[date | None] = mapped_column(Date)
+    period_end: Mapped[date | None] = mapped_column(Date)
+    record_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    observation_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    listing_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    truncated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    attribution: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        Index("ix_snapshots_source_fetched", "source_id", "fetched_at"),
+    )
 
 
 class Product(Base):
@@ -392,6 +466,8 @@ class TrendObservation(Base):
     source_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     meta: Mapped[dict] = mapped_column("metadata", JSON, default=dict, nullable=False)
 
     __table_args__ = (
@@ -675,6 +751,8 @@ __all__ = [
     "ProductMatch",
     "ProductMetric",
     "ProfitScenario",
+    "ProviderHealthCheck",
+    "ProviderSnapshot",
     "ResearchReport",
     "ScoringProfile",
     "Supplier",

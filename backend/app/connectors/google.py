@@ -13,6 +13,7 @@ rank/score, which is relative search interest, not sales.
 
 from __future__ import annotations
 
+import time
 from datetime import date, timedelta
 from typing import Any
 
@@ -21,6 +22,7 @@ from app.connectors.framework import (
     BaseConnector,
     ConnectorError,
     ConnectorUnavailable,
+    HealthResult,
     RawObservation,
     RawPayload,
 )
@@ -159,6 +161,55 @@ class GoogleBigQueryTrendsConnector(BaseConnector):
             ),
             metadata={"rows_returned": len(rows), "matched_products": len(seen)},
         )
+
+    def probe(self, source: Any) -> HealthResult:
+        if self.get_source_status(source).state == "requires_credentials":
+            return HealthResult(
+                status="unconfigured",
+                ok=False,
+                message="GOOGLE_APPLICATION_CREDENTIALS is not set.",
+                live=True,
+            )
+        started = time.perf_counter()
+        try:
+            from google.cloud import bigquery  # type: ignore[import-not-found]
+        except ImportError:
+            return HealthResult(
+                status="unavailable",
+                ok=False,
+                message=(
+                    "google-cloud-bigquery is not installed; install the optional "
+                    "requirements to use this connector."
+                ),
+                live=True,
+            )
+        try:
+            client = bigquery.Client()
+            # A dry run validates credentials and dataset access at no query cost.
+            job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
+            client.query(
+                "SELECT 1 FROM `bigquery-public-data.google_trends."
+                "international_top_rising_terms` LIMIT 1",
+                job_config=job_config,
+            )
+            latency = int((time.perf_counter() - started) * 1000)
+            return HealthResult(
+                status="healthy",
+                ok=True,
+                message="BigQuery credentials and public trends dataset are reachable.",
+                latency_ms=latency,
+                details={"dataset": TRENDS_DATASET_URL, "dry_run": True},
+                live=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - health checks must not raise
+            latency = int((time.perf_counter() - started) * 1000)
+            return HealthResult(
+                status="degraded",
+                ok=False,
+                message=f"BigQuery probe failed: {type(exc).__name__}: {exc}"[:500],
+                latency_ms=latency,
+                live=True,
+            )
 
 
 def _as_date(value: Any) -> date | None:

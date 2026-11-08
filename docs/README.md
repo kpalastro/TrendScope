@@ -27,8 +27,9 @@ Phases 2–4 proceed per [`05-implementation-plan.md`](05-implementation-plan.md
 2. **Google Trends has no public API.** The official API has been in application-only alpha since
    July 2025, and `pytrends` was archived in April 2025. Phase 1 therefore uses the free routes:
    manual CSV export and the public BigQuery `google_trends` dataset, behind a connector interface,
-   with a deterministic mock. A paid intermediary (DataForSEO, ~US$0.011/query) remains a Phase 2
-   option once usage shows the free route is the limiting factor. See
+   with a deterministic mock. A paid intermediary (DataForSEO) is available as a disabled, optional
+   plugin (`google_trends_dataforseo`) with explicit credentials and terms; it remains off by
+   default until usage shows the free route is the limiting factor. See
    [`06-free-first-gap-analysis.md`](06-free-first-gap-analysis.md).
 3. **Amazon Australia is not reachable through a legitimate first-party API.** PA-API 5.0 is being
    retired in favour of the Creators API, which has no bestseller endpoint and no `amazon.com.au`
@@ -48,7 +49,8 @@ anyway (§4.4).
 
 ## Naming conventions used throughout
 
-- Provider keys: `google_trends`, `ebay_au`, `amazon_au`, `tiktok`, `exploding_topics`,
+- Provider keys: `google_trends`, `google_trends_dataforseo`, `google_bigquery_trends`, `ebay_au`,
+  `amazon_au`, `amazon_public_research`, `meta_ad_library`, `tiktok`, `exploding_topics`,
   `cj_dropshipping`, `aliexpress`, `alibaba`, `csv_import`, `manual`, `mock`.
 - Score components: `demand`, `marketplace`, `social`, `competition`, `profitability`, `seasonal`.
 - Growth windows: `7d`, `30d`, `90d`, `180d`, `365d`.

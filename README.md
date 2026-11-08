@@ -129,7 +129,8 @@ Schedules run in **Australia/Sydney**:
   decimal arithmetic and saves scenarios to your account.
 - **Dashboard** — eight ranked widgets plus summary KPIs and source health.
 - **Product detail** — trend chart, score breakdown, competition evidence,
-  listings, supplier offers, provenance and data-quality panel.
+  listings, supplier offers, recent observations with provider/revision, provenance
+  and data-quality panel.
 - **Watchlist** — statuses, priority, notes, CSV export, 2–5 product comparison.
 - **Reports** — weekly snapshots with top growth, opportunities, emerging,
   category mix, unavailable-data counts, limitations and CSV/JSON/XLSX download
@@ -137,7 +138,7 @@ Schedules run in **Australia/Sydney**:
 - **Auth** — Argon2id passwords, JWT bearer tokens with silent refresh, rotating
   single-use refresh tokens in an HttpOnly cookie, server-side logout and an
   append-only audit log; roles `admin`, `analyst`, `viewer`.
-- **Tests** — 126 backend unit and integration tests; `npx tsc --noEmit` and
+- **Tests** — 155 backend unit and integration tests; `npx tsc --noEmit` and
   `next build` are clean.
 
 ## Architecture at a glance
@@ -154,9 +155,13 @@ Next.js 15 (App Router)  ──/api/backend rewrite──▶  FastAPI /api/v1
 
 Key design points:
 
-1. **Raw history is append-only.** `trend_observations` is never updated in
-   place; a natural key on `(product, source, date, metric)` makes re-ingestion
-   idempotent.
+1. **Observation provenance travels with the value.** A natural key on
+   `(product, source, date, metric, granularity, country)` makes re-ingestion
+   idempotent. A changed provider value updates the current row in place,
+   increments `revision` and keeps earlier values in `metadata.previous_values`;
+   the immutable `provider_snapshots` archive retains the full earlier payload.
+   Connector health checks are append-only, so flapping or credential failures
+   remain visible after recovery.
 2. **Reads never aggregate raw history.** Ingestion writes `product_metrics` and
    `opportunity_scores` snapshots. Every read path joins the latest snapshot.
 3. **Missing data stays missing.** A growth value that cannot be computed is
@@ -211,6 +216,7 @@ scoring engine or database design.
 | Mock (`mock`) | synthetic | **Enabled** | Deterministic generator; no external calls |
 | CSV import (`csv_import`) | manual | **Enabled** | Products and research observations; UTF-8, 2 MB |
 | Google Trends (`google_trends`) | free | Manual fallback | No public API; use the CSV export |
+| Google Trends via DataForSEO (`google_trends_dataforseo`) | paid | Optional, disabled | Documented Trends API; operator account and terms review required. The free routes remain the default |
 | Google BigQuery trends (`google_bigquery_trends`) | free | Needs credentials | Public `google_trends` dataset; optional `google-cloud-bigquery` extra |
 | eBay AU (`ebay_au`) | free | Needs credentials | Browse API active listings only; no sold data |
 | Meta Ad Library (`meta_ad_library`) | free | Needs credentials | Advertising activity only, not engagement or sales |
@@ -220,9 +226,12 @@ scoring engine or database design.
 | Exploding Topics (`exploding_topics`) | paid | Optional, disabled | Add later without changing scoring |
 | CJ Dropshipping (`cj_dropshipping`) | free | Optional, disabled | Supplier API access is conditional |
 
-A source can be tested without a provider call (`POST /data-sources/{id}/test-connection`).
-Sync refuses unavailable or unconfigured providers with a reason. The data-source
-screen shows cost, usage, availability and health for every provider.
+A source can be checked without a provider call (configuration check) or with
+the cheapest authenticated provider call (`?live=true`); both are recorded in
+append-only health history. Sync refuses unavailable or unconfigured providers
+with a reason. The data-source screen shows cost, usage, availability, health
+history and the immutable snapshot archive, including `records_updated` for
+revised observations.
 
 ## Scoring model
 
@@ -287,6 +296,10 @@ PATCH/DELETE /api/v1/profit/scenarios/{id}
 GET  /api/v1/reports                 POST /api/v1/reports
 GET  /api/v1/reports/{id}/download   GET  /api/v1/exports/products
 GET  /api/v1/data-sources            POST /api/v1/data-sources/{id}/sync
+GET  /api/v1/data-sources/health     GET  /api/v1/data-sources/{id}/health
+POST /api/v1/data-sources/{id}/health-check?live=
+GET  /api/v1/data-sources/{id}/snapshots
+GET  /api/v1/data-sources/{id}/snapshots/{snapshot_id}
 POST /api/v1/data-sources/{id}/test-connection
 GET  /api/v1/sync/status             GET  /api/v1/scoring-profiles
 POST /api/v1/scores/recalculate
@@ -303,7 +316,7 @@ use a consistent envelope:
 
 ```bash
 make test
-# 126 passed
+# 155 passed
 ```
 
 The suite runs against a temporary SQLite database per test. It covers growth
@@ -313,7 +326,9 @@ reuse detection, logout), RBAC, product reads and merge safety, watchlist
 behaviour, CSV import validation (including identifiers), dashboard/report
 generation and XLSX/CSV export, sync idempotency, connector status gating,
 observation provenance, manual supplier/observation entry, score recalculation,
-the GST profit model and recommendation verdicts.
+the GST profit model and recommendation verdicts, HTTP retry/backoff,
+configuration and live health checks, snapshot truncation/pruning, observation
+revisions and DataForSEO response normalisation.
 
 The frontend is checked with:
 

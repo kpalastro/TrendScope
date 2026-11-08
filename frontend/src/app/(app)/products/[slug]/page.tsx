@@ -38,7 +38,7 @@ import {
 } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { useApi } from "@/lib/useApi";
-import type { ProductDetail, Recommendation } from "@/lib/types";
+import type { ObservationRow, ProductDetail, Recommendation } from "@/lib/types";
 import {
   CLASSIFICATION_LABEL,
   COMPETITION_LABEL,
@@ -63,37 +63,39 @@ function ScoreDial({ value, classification }: { value: number | null; classifica
         ? "var(--color-amber)"
         : "var(--color-accent)";
   return (
-    <div className="relative h-[132px] w-[132px] shrink-0">
-      <svg viewBox="0 0 120 120" className="h-full w-full" role="img" aria-label={`Opportunity score ${value === null ? "unavailable" : value.toFixed(1)} out of 100`}>
-        <circle cx="60" cy="60" r={radius} fill="none" stroke="var(--color-line)" strokeWidth="8" />
-        {value !== null ? (
-          <circle
-            cx="60"
-            cy="60"
-            r={radius}
-            fill="none"
-            stroke={tone}
-            strokeWidth="8"
-            strokeLinecap="round"
-            strokeDasharray={`${circumference * filled} ${circumference}`}
-            transform="rotate(-90 60 60)"
-          />
-        ) : null}
-        <text
-          x="60"
-          y="58"
-          textAnchor="middle"
-          fontSize="26"
-          fontWeight="600"
-          fill="var(--color-ink)"
-          fontFamily="IBM Plex Mono, monospace"
-        >
-          {value === null ? "—" : value.toFixed(1)}
-        </text>
-        <text x="60" y="78" textAnchor="middle" fontSize="9" fill="var(--color-muted)" letterSpacing="1.5">
-          {classification ? CLASSIFICATION_LABEL[classification] ?? classification : "Not scored"}
-        </text>
-      </svg>
+    <div className="flex w-[132px] shrink-0 flex-col items-center">
+      <div className="h-[132px] w-[132px]">
+        <svg viewBox="0 0 120 120" className="h-full w-full" role="img" aria-label={`Opportunity score ${value === null ? "unavailable" : value.toFixed(1)} out of 100`}>
+          <circle cx="60" cy="60" r={radius} fill="none" stroke="var(--color-line)" strokeWidth="8" />
+          {value !== null ? (
+            <circle
+              cx="60"
+              cy="60"
+              r={radius}
+              fill="none"
+              stroke={tone}
+              strokeWidth="8"
+              strokeLinecap="round"
+              strokeDasharray={`${circumference * filled} ${circumference}`}
+              transform="rotate(-90 60 60)"
+            />
+          ) : null}
+          <text
+            x="60"
+            y="66"
+            textAnchor="middle"
+            fontSize="26"
+            fontWeight="600"
+            fill="var(--color-ink)"
+            fontFamily="IBM Plex Mono, monospace"
+          >
+            {value === null ? "—" : value.toFixed(1)}
+          </text>
+        </svg>
+      </div>
+      <span className="mt-1 text-center text-[0.68rem] leading-tight text-muted">
+        {classification ? CLASSIFICATION_LABEL[classification] ?? classification : "Not scored"}
+      </span>
     </div>
   );
 }
@@ -778,6 +780,81 @@ function ManualEvidence({ slug, onSaved }: { slug: string; onSaved: () => void }
   );
 }
 
+function RecentObservations({ slug }: { slug: string }) {
+  const { data, error, loading } = useApi<{ observations: ObservationRow[] }>(
+    `/products/${slug}/observations?limit=8`,
+  );
+  return (
+    <Card className="p-5">
+      <h2 className="text-sm font-semibold tracking-tight">Recent observations</h2>
+      <p className="mt-0.5 text-xs leading-relaxed text-muted">
+        Provider, verification and revision are stored on every observation. When a provider
+        revises a value for the same date and metric, the row is updated in place, its revision
+        increases and the earlier values stay in its history.
+      </p>
+      {loading && !data ? (
+        <Skeleton className="mt-3 h-28" />
+      ) : data?.observations.length ? (
+        <div className="mt-3 overflow-x-auto">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Metric</th>
+                <th className="text-right">Value</th>
+                <th>Provider</th>
+                <th>Revision</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.observations.map((observation) => (
+                <tr key={observation.id}>
+                  <td className="whitespace-nowrap text-xs">
+                    {formatDate(observation.observation_date)}
+                  </td>
+                  <td className="text-xs">
+                    {observation.metric_name}
+                    <span className="block text-[0.65rem] text-muted">
+                      {observation.metric_type} · {observation.granularity}
+                    </span>
+                  </td>
+                  <td className="num whitespace-nowrap text-right text-xs">
+                    {observation.value}
+                    {observation.unit ? (
+                      <span className="text-muted"> {observation.unit}</span>
+                    ) : null}
+                  </td>
+                  <td className="text-xs">
+                    {observation.provider_name ?? "—"}
+                    <span className="block text-[0.65rem] text-muted">
+                      {observation.verification_status} · {observation.data_quality}
+                      {observation.is_synthetic ? " · synthetic" : ""}
+                    </span>
+                  </td>
+                  <td>
+                    <Pill tone={observation.revision > 1 ? "accent" : "muted"}>
+                      v{observation.revision}
+                    </Pill>
+                    {observation.updated_at ? (
+                      <span className="mt-0.5 block text-[0.65rem] text-muted">
+                        revised {formatDateTime(observation.updated_at)}
+                      </span>
+                    ) : null}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p className="mt-3 text-sm text-muted">
+          {error ?? "No observations recorded for this product yet."}
+        </p>
+      )}
+    </Card>
+  );
+}
+
 export default function ProductDetailPage() {
   const params = useParams<{ slug: string }>();
   const slug = Array.isArray(params?.slug) ? params.slug[0] : params?.slug;
@@ -1113,6 +1190,8 @@ export default function ProductDetailPage() {
               ))}
             </dl>
           </Card>
+
+          <RecentObservations slug={data.slug} />
 
           <Card className="p-5">
             <h2 className="flex items-center gap-2 text-sm font-semibold tracking-tight">

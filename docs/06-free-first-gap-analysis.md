@@ -4,8 +4,8 @@
 (`docs/01`–`docs/05`) with the free-first data-source specification supplied on
 2026-11-08, record every material gap, and document how the codebase now closes it.
 
-**Status:** implemented in the backend and frontend. Migrations `0001`–`0003` apply cleanly,
-the full backend suite (126 tests) passes, and the frontend production build succeeds.
+**Status:** implemented in the backend and frontend. Migrations `0001`–`0004` apply cleanly,
+the full backend suite (155 tests) passes, and the frontend production build succeeds.
 
 ---
 
@@ -77,6 +77,7 @@ provenance.
 | Mock | Synthetic, enabled | Deterministic demo; always labelled |
 | CSV import | Manual, enabled | Universal free fallback; also carries research observations |
 | Google Trends | Free, manual fallback | No general public API; do not use archived `pytrends` |
+| Google Trends via DataForSEO | Paid, optional, disabled | Documented Trends API with explicit terms; operator credentials and a terms/pricing review required. The free routes remain the default |
 | Google BigQuery trends | Free, optional credentials | Public `bigquery-public-data.google_trends` dataset; `google-cloud-bigquery` is an optional extra |
 | eBay AU | Free, credentials required | Browse API gives active listings/prices only; sold data is not available to new users |
 | Meta Ad Library | Free, credentials required | Advertising activity only; never labelled as social engagement or sales |
@@ -199,7 +200,28 @@ run for the affected product, so the recommendation reflects the new evidence.
 
 ---
 
-## 7. Residual limitations
+## 7. Connector operations, health and history
+
+The connector framework records what happened, not only the latest value.
+
+| Concern | Implementation |
+| --- | --- |
+| Transient provider failures | `connectors/http.py` retries network errors, `429`, `500`, `502`, `503` and `504` with bounded exponential backoff, jitter and `Retry-After`; client errors and auth failures are never retried |
+| Connector-level retries | `run_connector_sync` retries only errors that `handle_errors` marks retryable, bounded by configured attempts and backoff; the successful attempt number is recorded in `ingestion_runs.cursor` |
+| Health checks | `provider_health.evaluate` records an append-only `provider_health_checks` row and mirrors `health_status`, `last_health_check_at` and latency onto the source |
+| Configuration vs live | `live=false` is a free local check; `live=true` calls each connector's cheapest authenticated probe (eBay OAuth token, BigQuery dry run, Meta one-row query, DataForSEO account endpoint). A missing probe falls back to the configuration result rather than inventing a failure |
+| Immutable evidence | Every sync stores a `provider_snapshots` row with the normalised records, counts, period, SHA-256 checksum, attribution and truncation flag; retention is bounded and pruned weekly |
+| Revised observations | A changed value for an existing natural key updates the row in place, increments `revision`, records `updated_at` and keeps up to five prior values in `metadata.previous_values`; `records_updated` distinguishes revisions from inserts |
+| Scheduled operations | Celery beat runs a daily configuration health check, a daily sync of enabled non-synthetic connectors and a weekly snapshot prune |
+
+The optional DataForSEO plugin (`google_trends_dataforseo`) is now a registered,
+disabled paid connector with credentials, documented API terms and explicit
+relative-index labelling. It does not replace the free manual/CSV route and is
+not enabled by default.
+
+---
+
+## 8. Residual limitations
 
 - Google Trends remains manual/CSV unless the BigQuery extra is installed and
   credentials are supplied. The public dataset is a trends sample, not a
@@ -211,16 +233,20 @@ run for the affected product, so the recommendation reflects the new evidence.
 - Amazon AU and TikTok have no permitted automated route for this market.
 - Supplier verification is manual. A `recommended` verdict means the evidence was
   recorded, not that the supplier was independently audited.
-- Paid providers are structurally optional but not pre-integrated beyond the
-  disabled Exploding Topics entry.
+- Paid providers are structurally optional. Exploding Topics remains a disabled
+  entry; DataForSEO is an optional, credential-gated Google Trends plugin and is
+  disabled by default. Neither is required by the MVP.
 
-## 8. Verification
+## 9. Verification
 
-- `backend`: `126 passed` under pytest, including the free-first tests for
+- `backend`: `155 passed` under pytest, including the free-first tests for
   connector status gating, provenance, manual observations/suppliers, CSV
-  observation import and every recommendation verdict path, plus the Phase-1
+  observation import and every recommendation verdict path, the Phase-1
   completion tests for refresh-token rotation/reuse, merges, score recalculation,
-  the GST profit model and XLSX export.
-- `alembic upgrade head` and `alembic check`: no drift.
-- `frontend`: `tsc --noEmit` and `next build` succeed; `/opportunities` and
-  `/profit` are new routes.
+  the GST profit model and XLSX export, and the connector-operations tests for
+  retry/backoff, configuration and live health checks, snapshot truncation and
+  pruning, observation revisions and DataForSEO normalisation.
+- `alembic upgrade head` and `alembic check`: migrations `0001`–`0004` apply
+  cleanly with no drift.
+- `frontend`: `tsc --noEmit` and `next build` succeed; `/opportunities`,
+  `/profit`, source health history and the snapshot archive are new surfaces.

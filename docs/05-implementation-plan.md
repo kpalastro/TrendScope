@@ -15,15 +15,15 @@ actually covers against the milestones below; unlisted work is still planned.
 | Milestone | Status | Notes |
 |---|---|---|
 | M0 Foundation | Done | Compose stack, health endpoints, structured errors, request IDs |
-| M1 Schema and seed | Done | Migrations `0001`–`0003`; seeders and constraint tests |
+| M1 Schema and seed | Done | Migrations `0001`–`0004`; seeders and constraint tests |
 | M2 Catalogue API | Done | Catalogue, rotating refresh tokens, logout, RBAC, audit log |
 | M3 Import and dedup | Done | CSV import, identifier-first matching, fuzzy review queue, non-destructive merge |
-| M4 Free-first connectors | Done | See [`06-free-first-gap-analysis.md`](06-free-first-gap-analysis.md) |
+| M4 Free-first connectors | Done | See [`06-free-first-gap-analysis.md`](06-free-first-gap-analysis.md); includes retrying HTTP, provider health history, immutable snapshots and observation revisions |
 | M5 Metrics | Done | Growth guards, coverage, competition, discovery read models |
 | M6 Scoring | Done | Profiles, explainable scores, `POST /scores/recalculate` |
-| M7 Frontend | Done | Shell, dashboard, explorer, product detail, watchlist |
+| M7 Frontend | Done | Shell, dashboard, explorer, product detail, watchlist, source health and snapshots |
 | M8 Reports and export | Done | GST profit calculator with saved scenarios; CSV/JSON/XLSX reports |
-| M9 Hardening | Partial | Backend suite green (126 tests) and production build clean; PDF export, Playwright smoke, accessibility audit and the 10k-product performance check remain |
+| M9 Hardening | Partial | Backend suite green (155 tests) and production build clean; PDF export, Playwright smoke, accessibility audit and the 10k-product performance check remain |
 
 ---
 

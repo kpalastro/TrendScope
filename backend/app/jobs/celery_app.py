@@ -41,4 +41,16 @@ celery_app.conf.beat_schedule = {
         "task": "app.jobs.tasks.recompute_scores",
         "schedule": crontab(hour=3, minute=0),
     },
+    "provider-health-daily": {
+        "task": "app.jobs.tasks.check_provider_health",
+        "schedule": crontab(hour=4, minute=0),
+    },
+    "connector-sync-daily": {
+        "task": "app.jobs.tasks.sync_enabled_connectors",
+        "schedule": crontab(hour=4, minute=30),
+    },
+    "snapshot-retention-weekly": {
+        "task": "app.jobs.tasks.prune_snapshots",
+        "schedule": crontab(hour=5, minute=0, day_of_week=0),
+    },
 }

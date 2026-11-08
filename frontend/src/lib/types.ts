@@ -197,7 +197,18 @@ export type ObservationRow = {
   confidence: number;
   is_synthetic: boolean;
   collected_at: string;
+  revision: number;
+  updated_at: string | null;
   notes: string | null;
+  attribution: {
+    provider_name: string | null;
+    source_url: string | null;
+    collected_at: string;
+    verification_status: string;
+    data_quality: string;
+    is_synthetic: boolean;
+    revision: number;
+  };
 };
 
 export type ProductDetail = ProductSummary & {
@@ -362,7 +373,57 @@ export type DataSource = {
   docs_url: string | null;
   terms_url: string | null;
   health: string;
+  health_status: string;
+  last_health_check_at: string | null;
+  last_health_latency_ms: number | null;
   connector: SourceConnector;
+};
+
+export type ProviderHealthCheck = {
+  id: string;
+  source_id: string;
+  checked_at: string;
+  live: boolean;
+  status: string;
+  ok: boolean;
+  latency_ms: number | null;
+  http_status: number | null;
+  message: string | null;
+  details: Record<string, unknown>;
+};
+
+export type ProviderHealthSummary = {
+  source_id: string;
+  provider_key: string;
+  provider_name: string;
+  health_status: string;
+  last_health_check_at: string | null;
+  last_health_latency_ms: number | null;
+  last_sync_at: string | null;
+  last_success_at: string | null;
+  sync_status: string;
+  consecutive_failures: number;
+  checks_24h: number;
+  ok_24h: number;
+  success_rate_24h: number | null;
+  avg_latency_ms_24h: number | null;
+  latest_check: ProviderHealthCheck | null;
+  latest_run: IngestionRun | null;
+};
+
+export type ProviderSnapshot = {
+  id: string;
+  source_id: string;
+  ingestion_run_id: string | null;
+  fetched_at: string;
+  period_start: string | null;
+  period_end: string | null;
+  record_count: number;
+  observation_count: number;
+  listing_count: number;
+  checksum: string;
+  truncated: boolean;
+  attribution: Record<string, unknown>;
 };
 
 export type IngestionRun = {
@@ -374,9 +435,11 @@ export type IngestionRun = {
   finished_at: string | null;
   records_fetched: number;
   records_written: number;
+  records_updated: number;
   records_rejected: number;
   error_count: number;
   error_summary: string | null;
+  cursor: Record<string, unknown>;
 };
 
 export type SourceStatus = DataSource & { latest_run: IngestionRun | null };

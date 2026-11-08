@@ -10,6 +10,7 @@ reproducible and what the idempotency test asserts.
 
 from __future__ import annotations
 
+import time
 from datetime import date, timedelta
 from uuid import UUID
 
@@ -26,6 +27,7 @@ from app.connectors.catalog import CATEGORIES
 from app.connectors.framework import ConnectorError, ConnectorUnavailable
 from app.connectors.mock import build_mock_dataset
 from app.connectors.registry import get_connector
+from app.core.config import settings
 from app.models import (
     Category,
     DataSource,
@@ -42,6 +44,7 @@ from app.services.metrics import compute_all_metrics
 from app.services.normalise import normalise_name
 from app.services.scoring_service import compute_all_scores
 from app.services.slugs import unique_product_slug
+from app.services.snapshots import store_snapshot
 
 CHUNK = 2000
 
@@ -143,18 +146,28 @@ def _insert_observations(
     run: IngestionRun,
     dataset,
     product_map: dict[str, Product],
-) -> tuple[int, int]:
-    existing = set(
-        db.execute(
-            select(
-                TrendObservation.product_id,
-                TrendObservation.observation_date,
-                TrendObservation.metric_name,
-                TrendObservation.granularity,
-            ).where(TrendObservation.source_id == source.id)
-        ).all()
-    )
+) -> tuple[int, int, int]:
+    """Insert new observations and revise changed ones.
+
+    Returns ``(added, updated, rejected)``. The natural key stays stable, so a
+    repeated sync does not duplicate rows. When a provider corrects a value for
+    the same key, the current row is updated, ``revision`` is incremented and
+    the prior value is kept in ``metadata.previous_values`` (bounded). The
+    immutable ``provider_snapshots`` archive retains the full earlier payload.
+    """
+    existing = {
+        (
+            row.product_id,
+            row.observation_date,
+            row.metric_name,
+            row.granularity,
+        ): row
+        for row in db.execute(
+            select(TrendObservation).where(TrendObservation.source_id == source.id)
+        ).scalars()
+    }
     added = 0
+    updated = 0
     rejected = 0
     pending: list[TrendObservation] = []
     for point in dataset.observations:
@@ -163,13 +176,46 @@ def _insert_observations(
             rejected += 1
             continue
         key = (product.id, point.observation_date, point.metric_name, point.granularity)
-        if key in existing:
-            continue
         metric_type = point.metric_type or infer_metric_type(point.metric_name)
         verification = (
             "synthetic" if source.is_synthetic else point.verification_status
         )
         quality = "synthetic" if source.is_synthetic else point.data_quality
+        row = existing.get(key)
+        if row is not None:
+            new_value = float(point.metric_value)
+            old_value = float(row.metric_value)
+            if abs(new_value - old_value) < 1e-9:
+                continue
+            previous = list((row.meta or {}).get("previous_values") or [])
+            previous.append(
+                {
+                    "value": old_value,
+                    "at": utcnow().isoformat(),
+                    "ingestion_run_id": str(run.id),
+                }
+            )
+            row.metric_value = new_value
+            row.metric_type = metric_type
+            row.unit = point.unit
+            row.period_start = point.period_start or point.observation_date
+            row.period_end = point.period_end or point.observation_date
+            row.source_url = point.source_url
+            row.verification_status = verification
+            row.data_quality = quality
+            row.original_metric = point.original_metric
+            row.confidence = point.confidence
+            row.source_timestamp = point.source_timestamp or utcnow()
+            row.collected_at = utcnow()
+            row.ingestion_run_id = run.id
+            row.revision = int(row.revision or 1) + 1
+            row.updated_at = utcnow()
+            row.meta = {
+                **(row.meta or {}),
+                "previous_values": previous[-5:],
+            }
+            updated += 1
+            continue
         pending.append(
             TrendObservation(
                 product_id=product.id,
@@ -194,10 +240,11 @@ def _insert_observations(
                 is_synthetic=bool(source.is_synthetic),
                 source_timestamp=point.source_timestamp or utcnow(),
                 collected_at=utcnow(),
+                revision=1,
                 meta=point.meta or {},
             )
         )
-        existing.add(key)
+        existing[key] = pending[-1]
         added += 1
         if len(pending) >= CHUNK:
             db.add_all(pending)
@@ -206,7 +253,7 @@ def _insert_observations(
     if pending:
         db.add_all(pending)
         db.flush()
-    return added, rejected
+    return added, updated, rejected
 
 
 def _upsert_listings(
@@ -369,6 +416,8 @@ def _write_dataset(
     *,
     as_of: date,
     seed_product_map: dict[str, Product] | None = None,
+    period_start: date | None = None,
+    period_end: date | None = None,
 ) -> dict[str, int]:
     """Upsert a normalised connector dataset and recompute derived snapshots."""
     categories = _ensure_categories(db)
@@ -381,10 +430,20 @@ def _write_dataset(
         created_products += int(created)
     db.commit()
 
-    observations_added, obs_rejected = _insert_observations(
+    observations_added, observations_updated, obs_rejected = _insert_observations(
         db, source, run, dataset, product_map
     )
     rejected += obs_rejected
+    db.commit()
+
+    snapshot = store_snapshot(
+        db,
+        source,
+        run,
+        dataset,
+        period_start=period_start or as_of,
+        period_end=period_end or as_of,
+    )
     db.commit()
 
     listings_added, listing_rejected = _upsert_listings(db, source, dataset, product_map)
@@ -400,10 +459,13 @@ def _write_dataset(
     return {
         "created_products": created_products,
         "observations": observations_added,
+        "observations_updated": observations_updated,
         "listings": listings_added,
         "suppliers": suppliers_added,
         "offers": offers_added,
         "rejected": rejected,
+        "snapshot_id": str(snapshot.id),
+        "snapshot_truncated": int(snapshot.truncated),
     }
 
 
@@ -415,6 +477,7 @@ def _finish_run(
     *,
     request_count: int = 0,
     warnings: list[str] | None = None,
+    extra_cursor: dict | None = None,
 ) -> None:
     run.status = "success"
     run.finished_at = utcnow()
@@ -425,11 +488,18 @@ def _finish_run(
         + counts["suppliers"]
         + counts["offers"]
     )
+    run.records_updated = counts.get("observations_updated", 0)
     run.records_rejected = counts["rejected"]
     run.error_count = 0
     run.error_summary = None
+    cursor = dict(extra_cursor or {})
     if warnings:
-        run.cursor = {"warnings": warnings[:20]}
+        cursor["warnings"] = warnings[:20]
+    if counts.get("snapshot_id"):
+        cursor["snapshot_id"] = counts["snapshot_id"]
+        cursor["snapshot_truncated"] = bool(counts.get("snapshot_truncated"))
+    if cursor:
+        run.cursor = cursor
     source.last_sync_at = utcnow()
     source.last_success_at = source.last_sync_at
     source.sync_status = "ok"
@@ -459,10 +529,11 @@ def run_mock_sync(
     run_id, source_id = run.id, source.id
 
     try:
+        history = max(1, history_days or settings.mock_history_days)
         dataset = build_mock_dataset(
             as_of=as_of,
             product_limit=product_limit or settings.mock_product_limit,
-            history_days=history_days or settings.mock_history_days,
+            history_days=history,
         )
         run.records_fetched = (
             len(dataset.products)
@@ -473,7 +544,15 @@ def run_mock_sync(
         )
         db.commit()
 
-        counts = _write_dataset(db, source, run, dataset, as_of=as_of)
+        counts = _write_dataset(
+            db,
+            source,
+            run,
+            dataset,
+            as_of=as_of,
+            period_start=as_of - timedelta(days=history - 1),
+            period_end=as_of,
+        )
         _finish_run(db, run, source, counts)
     except Exception as exc:  # noqa: BLE001 - the run record must capture any failure
         _mark_failed(db, run_id, source_id, exc)
@@ -557,7 +636,44 @@ def run_connector_sync(
             until=as_of,
             products=tracked,
         )
-        dataset = connector.run(ctx)
+        try:
+            retry_attempts = int(
+                (source.config or {}).get("retry_attempts")
+                or settings.connector_retry_attempts
+            )
+        except (TypeError, ValueError):
+            retry_attempts = settings.connector_retry_attempts
+        retry_attempts = max(1, min(retry_attempts, 5))
+        try:
+            backoff = float(
+                (source.config or {}).get("retry_backoff_seconds")
+                or settings.connector_retry_backoff_seconds
+            )
+        except (TypeError, ValueError):
+            backoff = settings.connector_retry_backoff_seconds
+        backoff = max(0.0, min(backoff, 30.0))
+
+        dataset = None
+        retry_cursor: dict = {}
+        for attempt in range(1, retry_attempts + 1):
+            try:
+                dataset = connector.run(ctx)
+                if attempt > 1:
+                    retry_cursor["succeeded_after_attempt"] = attempt
+                break
+            except ConnectorError as exc:
+                info = connector.handle_errors(exc)
+                if not info.retryable or attempt >= retry_attempts:
+                    raise
+                retry_cursor = {
+                    "retry_attempts": attempt,
+                    "retry_code": info.code,
+                    "retry_message": info.message[:500],
+                }
+                db.rollback()
+                time.sleep(backoff * (2 ** (attempt - 1)))
+        if dataset is None:  # pragma: no cover - the loop raises instead
+            raise ConnectorError("Connector returned no dataset.")
         run.records_fetched = (
             len(dataset.products)
             + len(dataset.observations)
@@ -580,6 +696,8 @@ def run_connector_sync(
             dataset,
             as_of=as_of,
             seed_product_map=seed_map,
+            period_start=ctx.since,
+            period_end=ctx.until,
         )
         _finish_run(
             db,
@@ -588,6 +706,7 @@ def run_connector_sync(
             counts,
             request_count=dataset.request_count,
             warnings=dataset.warnings,
+            extra_cursor=retry_cursor,
         )
     except Exception as exc:  # noqa: BLE001 - the run record must capture any failure
         _mark_failed(db, run_id, source_id, exc)

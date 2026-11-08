@@ -125,6 +125,24 @@ class ConnectorErrorInfo:
     retryable: bool
 
 
+@dataclass(frozen=True)
+class HealthResult:
+    """Outcome of a provider health check.
+
+    ``live`` distinguishes a local configuration check from a real provider
+    call. A live check may consume a small amount of provider quota; the
+    connectors implement the cheapest authenticated endpoint they have.
+    """
+
+    status: str
+    ok: bool
+    message: str
+    latency_ms: int | None = None
+    http_status: int | None = None
+    details: dict = field(default_factory=dict)
+    live: bool = False
+
+
 class BaseConnector(ABC):
     provider_key: ClassVar[str]
     provider_name: ClassVar[str]
@@ -188,6 +206,65 @@ class BaseConnector(ABC):
 
     def get_last_sync(self, source: Any) -> datetime | None:
         return getattr(source, "last_sync_at", None) if source is not None else None
+
+    def health_check(self, source: Any, *, live: bool = False) -> HealthResult:
+        """Assess availability without a provider call unless ``live`` is set.
+
+        A configuration check is always safe. A live check is delegated to
+        ``probe``; connectors that cannot make a cheap authenticated call fall
+        back to the configuration result rather than inventing a failure.
+        """
+        status = self.get_source_status(source)
+        if status.state == "manual_fallback":
+            return HealthResult(
+                status="manual",
+                ok=False,
+                message=status.reason or "Manual fallback; no automated provider call.",
+                details={"state": status.state, "configured": status.configured},
+                live=False,
+            )
+        if status.state == "unavailable":
+            return HealthResult(
+                status="unavailable",
+                ok=False,
+                message=status.reason or "Provider unavailable.",
+                details={"state": status.state},
+                live=False,
+            )
+        if status.state == "requires_credentials":
+            return HealthResult(
+                status="unconfigured",
+                ok=False,
+                message=status.reason or "Credentials are not configured.",
+                details={
+                    "state": status.state,
+                    "credential_names": list(status.credential_names),
+                },
+                live=False,
+            )
+        if live:
+            return self.probe(source)
+        return HealthResult(
+            status="healthy",
+            ok=True,
+            message="Configured and available.",
+            details={
+                "state": status.state,
+                "enabled": status.enabled,
+                "configured": status.configured,
+            },
+            live=False,
+        )
+
+    def probe(self, source: Any) -> HealthResult:
+        """Cheap authenticated provider call. Override where one exists."""
+        return HealthResult(
+            status="healthy",
+            ok=True,
+            message="No live probe is implemented; configuration check only.",
+            details={"live_supported": False},
+            live=False,
+        )
 
     @abstractmethod
     def fetch_data(self, ctx: ConnectorContext) -> RawPayload:

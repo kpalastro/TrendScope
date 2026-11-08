@@ -75,6 +75,32 @@ SOURCE_REGISTRY = [
         "config": {"geo": "AU", "max_terms_per_run": 250, "history_days": 35},
     },
     {
+        "provider_key": "google_trends_dataforseo",
+        "provider_name": "Google Trends via DataForSEO (authorised API)",
+        "source_type": "search_trend",
+        "enabled": False,
+        "is_synthetic": False,
+        "cost_model": "paid",
+        "monthly_cost": 0,
+        "availability": "requires_credentials",
+        "availability_reason": (
+            "Set DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD. DataForSEO provides a "
+            "documented Google Trends API under its terms; verify current pricing."
+        ),
+        "usage_rights": "api_terms",
+        "docs_url": "https://docs.dataforseo.com/v3/keywords_data/google_trends/overview/",
+        "terms_url": "https://dataforseo.com/terms-of-service",
+        "secret_ref": "DATAFORSEO_LOGIN,DATAFORSEO_PASSWORD",
+        "rate_limit_per_min": 12,
+        "config": {
+            "geo": "AU",
+            "location_code": 2036,
+            "time_range": "past_12_months",
+            "max_keywords_per_run": 10,
+            "history_days": 365,
+        },
+    },
+    {
         "provider_key": "ebay_au",
         "provider_name": "eBay Australia (Browse API)",
         "source_type": "marketplace",
@@ -94,6 +120,7 @@ SOURCE_REGISTRY = [
             "covers_sold_data": False,
             "max_keywords_per_run": 10,
             "listings_per_keyword": 50,
+            "max_pages_per_keyword": 1,
             "geo": "AU",
         },
     },
@@ -112,7 +139,7 @@ SOURCE_REGISTRY = [
         "terms_url": "https://www.facebook.com/legal/terms",
         "secret_ref": "META_AD_LIBRARY_TOKEN",
         "rate_limit_per_min": 30,
-        "config": {"geo": "AU", "max_keywords_per_run": 10, "ads_per_keyword": 100},
+        "config": {"geo": "AU", "max_keywords_per_run": 10, "ads_per_keyword": 100, "max_pages_per_keyword": 1},
     },
     {
         "provider_key": "amazon_public_research",

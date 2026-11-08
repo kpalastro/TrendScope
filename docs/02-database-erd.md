@@ -9,10 +9,14 @@
 ## 1. Design principles
 
 1. **Observations and derived values are separate.** Raw provider measurements live in
-   `trend_observations` (append-only). Anything computed by us lives in `product_metrics` and
-   `opportunity_scores`, each keyed by a date so history is retained (PRD §7, §8).
-2. **Never overwrite history.** Observation, listing-price and score history are insert-only. Only
-   mutable catalogue metadata (`products`, `categories`, `suppliers`) is updated in place.
+   `trend_observations` (the system of record). Anything computed by us lives in `product_metrics`
+   and `opportunity_scores`, each keyed by a date so history is retained (PRD §7, §8).
+2. **Never lose evidence.** Scores, audit logs, health checks and provider snapshots are insert-only.
+   Observation rows are keyed by their natural key; re-ingestion is idempotent, and a changed
+   provider value updates the current row while incrementing `revision` and retaining up to five
+   prior values. The immutable `provider_snapshots` payload preserves the full earlier evidence.
+   Only mutable catalogue metadata (`products`, `categories`, `suppliers`) is otherwise updated in
+   place.
 3. **Every fact has provenance.** Observations carry `source_id`, `source_timestamp`, `ingested_at`,
    `confidence` and `is_synthetic`. Scores carry the profile version and coverage that produced them.
 4. **Absence is explicit.** Numeric nullable columns are paired with a reason code column. A missing
@@ -20,7 +24,8 @@
 5. **Identity is explicit.** Products are matched on identifiers and aliases, not names. Merges are
    recorded, never destructive.
 6. **UUIDv7 primary keys** for domain tables (time-ordered, index-friendly); `BIGSERIAL` for
-   high-volume append-only tables (`trend_observations`, `audit_logs`, price observations).
+   high-volume log tables (`trend_observations`, `audit_logs`, `provider_health_checks`,
+   price observations).
 7. **Money** is `NUMERIC(12,2)` with an ISO-4217 `currency` beside it. Never float.
 8. **Time** is `timestamptz`, stored UTC. `DATE` is used for daily observation/snapshot keys.
 
@@ -327,6 +332,9 @@ Only created when `ENABLE_PGVECTOR=true`; guarded by a migration that requires t
 | `sync_status` | sync_status | `never_run | ok | partial | error | disabled | degraded` |
 | `last_error` | text | redacted, truncated |
 | `consecutive_failures` | integer | NOT NULL default 0 (circuit breaker) |
+| `health_status` | text | `healthy | degraded | unavailable | unconfigured | manual | unknown` |
+| `last_health_check_at` | timestamptz | latest health check |
+| `last_health_latency_ms` | integer | provider round-trip for the latest check |
 | `created_at` / `updated_at` | timestamptz | |
 
 `source_type`: `search_trend | marketplace | social | supplier | emerging | manual | demo`.
@@ -345,6 +353,7 @@ allow-list of `config` keys per provider and by a review checklist.
 | `finished_at` | timestamptz | |
 | `records_fetched` | integer | default 0 |
 | `records_written` | integer | default 0 |
+| `records_updated` | integer | observations revised in place; default 0 |
 | `records_rejected` | integer | default 0 |
 | `error_count` | integer | default 0 |
 | `cursor` | jsonb | provider cursor/ETag for incremental sync |
@@ -354,7 +363,7 @@ allow-list of `config` keys per provider and by a review checklist.
 
 Indexes: `(source_id, started_at DESC)`, `(status)` partial where status IN ('running','failed').
 
-### 4.3 `trend_observations` (append-only, the system of record)
+### 4.3 `trend_observations` (system of record, keyed by natural key)
 
 | Column | Type | Constraints |
 |---|---|---|
@@ -381,7 +390,9 @@ Indexes: `(source_id, started_at DESC)`, `(status)` partial where status IN ('ru
 | `source_timestamp` | timestamptz | when the provider says it was measured |
 | `collected_at` | timestamptz | when the observation entered TrendScope |
 | `ingested_at` | timestamptz | NOT NULL default now() |
-| `metadata` | jsonb | NOT NULL default `'{}'` — related query, region, listing id, etc. |
+| `revision` | integer | NOT NULL default 1 — increments when a provider revises the value |
+| `updated_at` | timestamptz | when the current revision replaced the prior value |
+| `metadata` | jsonb | NOT NULL default `'{}'` — related query, region, listing id, prior values, etc. |
 
 `metric_name`: `search_interest | search_interest_region | related_query_interest |
 marketplace_listing_count | marketplace_avg_price | marketplace_best_seller_rank |
@@ -413,6 +424,42 @@ after 90 days by a maintenance job.
 
 Indexes: `(source_id, fetched_at DESC)`, `(expires_at)` for the purge job. Used to debug a connector
 or replay an ingestion; not read on any product path.
+
+### 4.5 `provider_health_checks` (append-only)
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid | PK |
+| `source_id` | uuid | FK → data_sources, ON DELETE CASCADE |
+| `checked_at` | timestamptz | NOT NULL |
+| `live` | boolean | false for a local configuration check |
+| `status` | text | `healthy | degraded | unavailable | unconfigured | manual` |
+| `ok` | boolean | |
+| `latency_ms` / `http_status` | integer | provider round-trip evidence when live |
+| `message` | text | redacted, truncated |
+| `details` | jsonb | credential names, state, probe-specific safe details |
+
+Index: `(source_id, checked_at DESC)`. Health checks are never updated or deleted by ingestion;
+this is what makes a flapping provider and a recovered credential failure visible.
+
+### 4.6 `provider_snapshots` (append-only payload archive)
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid | PK |
+| `source_id` | uuid | FK → data_sources, ON DELETE CASCADE |
+| `ingestion_run_id` | uuid | FK → ingestion_runs, ON DELETE SET NULL |
+| `fetched_at` | timestamptz | NOT NULL |
+| `period_start` / `period_end` | date | period the payload covers |
+| `record_count` | integer | full count before truncation |
+| `observation_count` / `listing_count` | integer | full counts |
+| `checksum` | text | SHA-256 of the normalised payload |
+| `truncated` | boolean | payload bounded by `SNAPSHOT_MAX_RECORDS` |
+| `payload` | jsonb | normalised records; credentials and cursor tokens excluded |
+| `attribution` | jsonb | provider, usage rights, docs/terms, request count |
+
+Index: `(source_id, fetched_at DESC)`. Retained for `SNAPSHOT_RETENTION_DAYS` and pruned by a
+weekly job. The current `trend_observations` view can change; the snapshot cannot.
 
 ---
 

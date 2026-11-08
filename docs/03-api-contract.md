@@ -305,8 +305,14 @@ seasonal | best_margins | recently_discovered`. Common params: `country=AU` (def
 | GET | `/products/import/observations/template` | V | observation CSV template |
 | POST | `/products/discover` | N | run discovery connectors → 202 `Job` |
 
-`POST /products` accepts an optional `identifiers` map (`gtin`, `upc`, `ean`, `isbn`, `asin`,
-`ebay_item`, `supplier_sku`, `mpn`, `shopify_sku`) and `aliases`. Values are normalised and a value
+An observation row includes `provider_name`, `source_url`, `verification_status`, `data_quality`,
+`collected_at`, `revision` and `updated_at`, plus a nested `attribution` block with the same
+evidence. The natural key is `(product, source, observation_date, metric_name, granularity,
+country)`: a repeated sync inserts nothing, while a changed value updates the existing row,
+increments `revision` and keeps up to five earlier values in `metadata.previous_values`. The
+immutable provider snapshot preserves the complete earlier payload.
+
+`POST /products` accepts an optional `identifiers` map (`gtin`, `upc`, `ean`, `isbn`, `asin`,`ebay_item`, `supplier_sku`, `mpn`, `shopify_sku`) and `aliases`. Values are normalised and a value
 already owned by another product returns `409`. New products are queued for fuzzy review rather
 than merged automatically.
 
@@ -499,12 +505,22 @@ against the current API.
 |---|---|---|---|
 | GET | `/data-sources` | V | registry + status + `configured` (no secrets) |
 | PATCH | `/data-sources/{id}` | A | `{enabled, config, rate_limit_per_min}` |
-| POST | `/data-sources/{id}/test-connection` | A | synchronous health check (10 s timeout) |
+| POST | `/data-sources/{id}/test-connection` | A | local configuration check (no provider call) |
+| POST | `/data-sources/{id}/health-check?live=` | A | record a health check; `live=true` makes the cheapest authenticated provider call |
+| GET | `/data-sources/health` | V | latest health + 24-hour statistics for every source |
+| GET | `/data-sources/{id}/health` | V | source health summary and recent checks |
+| GET | `/data-sources/{id}/snapshots` | V | immutable archived payloads (metadata only) |
+| GET | `/data-sources/{id}/snapshots/{snapshot_id}` | V | one snapshot including its normalised payload |
 | POST | `/data-sources/{id}/sync` | N | 202 `Job`; requires `Idempotency-Key` |
 | GET | `/data-sources/{id}/runs` | V | paginated `ingestion_runs` |
 | GET | `/sync/status` | V | all sources: last run, next scheduled, errors |
 | GET | `/jobs/{id}` | V | job status/progress/result |
 | POST | `/jobs/{id}/cancel` | N | best-effort cancel |
+
+Health checks are append-only. A configuration check is local and free; it returns `healthy`,
+`manual`, `unavailable` or `unconfigured`, never a live latency. A live check uses the connector's
+cheapest authenticated endpoint and may consume a small amount of provider quota. `live` in the
+response distinguishes the two, and credential names are returned, never values.
 
 `GET /data-sources` item:
 
@@ -530,6 +546,9 @@ against the current API.
   "docs_url": "https://trends.google.com/trends/explore",
   "terms_url": "https://policies.google.com/terms",
   "health": "manual",
+  "health_status": "manual",
+  "last_health_check_at": "2026-11-08T03:15:00Z",
+  "last_health_latency_ms": null,
   "connector": {
     "installed": true,
     "available": false,
@@ -548,6 +567,19 @@ against the current API.
 `secret_ref` exposes **names only** — it tells an admin which variables to set, not their values.
 `estimated_monthly_spend` is the declared subscription cost plus any metered usage; it is never
 presented as a quote.
+
+An ingestion run carries `records_fetched`, `records_written`, `records_updated`,
+`records_rejected`, `error_summary` and `cursor`. `records_updated` counts observations whose value
+changed for an existing natural key (not a new insert). `cursor` records retry metadata
+(`retry_code`, `retry_attempts`, `succeeded_after_attempt`) and the `snapshot_id` written by the
+run.
+
+A snapshot item carries `record_count`, `observation_count`, `listing_count`, `checksum` (SHA-256
+of the normalised payload), `truncated`, the covered `period_start`/`period_end` and an
+`attribution` block (provider, usage rights, docs/terms, request count). The list endpoint omits
+the payload; the detail endpoint includes the normalised observations, listings, products,
+suppliers and offers. Payloads are bounded by `SNAPSHOT_MAX_RECORDS` and pruned after
+`SNAPSHOT_RETENTION_DAYS`; a truncated snapshot still reports the full `record_count`.
 
 ### 6.11 Scoring profiles and recalculation
 
@@ -658,8 +690,9 @@ whose `verified` claims lack resolvable `source_refs` (validation error, retry o
 - `409` is returned when a run for that source is already in progress.
 - A provider outage surfaces as a *successful* 202 whose job ends `failed` with a typed error code —
   triggering a sync is not the provider call.
-- `test-connection` is the one synchronous provider call (10 s timeout, no retry) so an admin gets an
-  immediate answer.
+- `health-check?live=false` is local and free; `health-check?live=true` is the one synchronous
+  provider call (short timeout, one retry policy) so an admin gets an immediate answer and can see
+  whether the failure was configuration or the provider.
 - `DELETE` on products is soft (`status = archived`); archived products remain queryable via
   `?status=archived` for audit.
 
