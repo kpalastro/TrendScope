@@ -226,6 +226,10 @@ class ProductCreate(BaseModel):
     description: str | None = None
     price: str | None = None
     keywords: list[str] = Field(default_factory=list)
+    # Deterministic dedup keys are optional, but when supplied they are what
+    # make a merge unambiguous. Aliases feed the fuzzy review queue.
+    identifiers: dict[str, str] = Field(default_factory=dict)
+    aliases: list[str] = Field(default_factory=list)
 
 
 class ProductPatch(BaseModel):
@@ -564,3 +568,68 @@ class ScoringProfileOut(BaseModel):
     is_active: bool
     is_default: bool
     created_at: datetime
+
+
+# --- recalculate, merge and profit ---------------------------------------
+
+
+class RecalculateRequest(BaseModel):
+    product_id: UUID | None = None
+    all: bool = False
+    as_of_date: date | None = None
+
+
+class MergeRequest(BaseModel):
+    into_product_id: UUID
+
+
+class MatchResolveRequest(BaseModel):
+    action: Literal["merge", "reject"]
+
+
+class ProfitInputs(BaseModel):
+    currency: str = Field(default="AUD", min_length=3, max_length=3)
+    supplier_price: Decimal = Field(default=Decimal("12.40"), gt=0)
+    international_shipping: Decimal = Field(default=Decimal("3.10"), ge=0)
+    import_duty_rate_pct: float = Field(default=0.0, ge=0, le=100)
+    supplier_charges_gst: bool = False
+    gst_registered: bool = True
+    gst_rate_pct: float = Field(default=10.0, ge=0, le=100)
+    claim_input_tax_credit: bool = True
+    domestic_fulfilment: Decimal = Field(default=Decimal("8.50"), ge=0)
+    packaging: Decimal = Field(default=Decimal("1.20"), ge=0)
+    payment_fee_pct: float = Field(default=1.75, ge=0, le=100)
+    payment_fee_fixed: Decimal = Field(default=Decimal("0.30"), ge=0)
+    advertising_cost_per_order: Decimal = Field(default=Decimal("12.00"), ge=0)
+    selling_price_inc_gst: Decimal = Field(default=Decimal("69.95"), gt=0)
+    return_rate_pct: float = Field(default=3.0, ge=0, le=100)
+    monthly_order_volumes: list[int] = Field(
+        default_factory=lambda: [100, 500, 1000, 5000], max_length=12
+    )
+
+
+class ProfitScenarioCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=160)
+    product_id: UUID | None = None
+    inputs: ProfitInputs = Field(default_factory=ProfitInputs)
+
+
+class ProfitScenarioPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=160)
+    product_id: UUID | None = None
+    inputs: ProfitInputs | None = None
+
+
+class ProfitScenarioOut(BaseModel):
+    id: UUID
+    product_id: UUID | None
+    name: str
+    currency: str
+    assumptions_version: str
+    inputs: dict[str, Any]
+    outputs: dict[str, Any]
+    warnings: list[str] = Field(default_factory=list)
+    disclaimer: str
+    created_at: datetime
+    updated_at: datetime
+

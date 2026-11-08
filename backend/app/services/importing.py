@@ -2,8 +2,9 @@
 
 Rows are validated before anything is written. A row with an unknown category or
 an unparseable price is rejected with a row number and a reason; it never
-silently disappears. Duplicate names are merged into the existing product rather
-than creating a second catalogue entry.
+silently disappears. A shared identifier (GTIN/ASIN/SKU) is treated as the same
+product deterministically; repeated names are merged into the existing product;
+near-miss names are queued for review instead of being guessed at.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import csv
 import io
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -21,11 +23,13 @@ from app.models import (
     Category,
     DataSource,
     Product,
+    ProductIdentifier,
     ProductKeyword,
     ProductMetric,
     TrendObservation,
     utcnow,
 )
+from app.services import matching
 from app.services.metrics import compute_product_metrics
 from app.services.normalise import normalise_name, slugify
 from app.services.scoring_service import compute_product_score, get_active_profile
@@ -39,6 +43,8 @@ TEMPLATE_COLUMNS = [
     "keywords",
     "description",
     "image_url",
+    "identifiers",
+    "aliases",
 ]
 
 
@@ -68,6 +74,8 @@ def template_csv() -> str:
             "kitchen;organiser;tray",
             "Optional description",
             "",
+            "gtin:9350000000012;asin:B0EXAMPLE1",
+            "Kitchen Tray Organiser",
         ]
     )
     return buffer.getvalue()
@@ -82,10 +90,33 @@ def _category_lookup(db: Session) -> dict[str, Category]:
 
 
 def _split_keywords(raw: str) -> list[str]:
-    import re
-
     parts = [part.strip() for part in re.split(r"[;|,]", raw or "") if part.strip()]
     return parts[:10]
+
+
+def _parse_identifiers(raw: str) -> dict[str, str]:
+    """Parse ``gtin:9350...;asin:B0EXAMPLE`` into a mapping.
+
+    Raises ``matching.IdentityError`` for an unknown scheme or empty value.
+    """
+
+    identifiers: dict[str, str] = {}
+    for part in re.split(r"[;|]", raw or ""):
+        part = part.strip()
+        if not part:
+            continue
+        if ":" not in part:
+            raise matching.IdentityError(
+                f"identifier '{part}' must look like scheme:value"
+            )
+        scheme, value = part.split(":", 1)
+        key, cleaned = matching.validate_identifier(scheme, value)
+        if key in identifiers and identifiers[key] != cleaned:
+            raise matching.IdentityError(
+                f"identifier scheme '{key}' appears twice in one row"
+            )
+        identifiers[key] = cleaned
+    return identifiers
 
 
 def _parse_price(raw: str) -> float | None:
@@ -142,6 +173,34 @@ def import_csv(db: Session, source: DataSource, content: str) -> ImportResult:
             continue
         seen_names.add(normalised)
 
+        try:
+            identifiers = _parse_identifiers(row.get("identifiers", ""))
+            aliases = _split_keywords(row.get("aliases", ""))
+        except matching.IdentityError as exc:
+            result.rejected += 1
+            result.errors.append({"row": line_number, "issue": str(exc)})
+            continue
+
+        # A deterministic identifier outranks the name: it is the same product
+        # even when the supplier spells it differently.
+        owners: set = set()
+        for scheme, value in identifiers.items():
+            identifier_row = db.execute(
+                select(ProductIdentifier).where(
+                    ProductIdentifier.scheme == scheme,
+                    ProductIdentifier.value == value,
+                )
+            ).scalar_one_or_none()
+            if identifier_row is not None:
+                owners.add(identifier_row.product_id)
+        if len(owners) > 1:
+            result.rejected += 1
+            result.errors.append(
+                {"row": line_number, "issue": "identifiers point at different products"}
+            )
+            continue
+        identifier_product = db.get(Product, next(iter(owners))) if owners else None
+
         category = None
         raw_category = row.get("category", "")
         if raw_category:
@@ -166,43 +225,67 @@ def import_csv(db: Session, source: DataSource, content: str) -> ImportResult:
             result.errors.append({"row": line_number, "issue": "price must be greater than zero"})
             continue
 
-        candidates = (
-            db.execute(select(Product).where(Product.normalised_name == normalised))
-            .scalars()
-            .all()
-        )
-        product = next((item for item in candidates if item.status == "active"), None)
-        archived = next((item for item in candidates if item.status == "archived"), None)
-
-        if product is None and archived is not None:
-            # Re-importing a product that was archived re-activates the existing
-            # row: it already owns the external id, slug and raw history.
-            product = archived
-            product.status = "active"
+        created = False
+        if identifier_product is not None:
+            product = identifier_product
+            if product.status == "archived":
+                product.status = "active"
             product.is_manual = True
             result.updated += 1
-        elif product is not None:
-            result.updated += 1
         else:
-            product = Product(
-                external_id=unique_external_id(db, source.id, f"csv-{slugify(name)}"),
-                source_id=source.id,
-                name=name[:300],
-                normalised_name=normalised,
-                slug=unique_product_slug(db, name, normalised),
-                description=row.get("description") or None,
-                category_id=category.id if category else None,
-                brand=(row.get("brand") or None),
-                image_url=(row.get("image_url") or None),
-                country="AU",
-                currency="AUD",
-                status="active",
-                is_manual=True,
-                is_synthetic=False,
+            candidates = (
+                db.execute(select(Product).where(Product.normalised_name == normalised))
+                .scalars()
+                .all()
             )
-            db.add(product)
-            db.flush()
-            result.created += 1
+            product = next((item for item in candidates if item.status == "active"), None)
+            archived = next((item for item in candidates if item.status == "archived"), None)
+
+            if product is None and archived is not None:
+                # Re-importing a product that was archived re-activates the existing
+                # row: it already owns the external id, slug and raw history.
+                product = archived
+                product.status = "active"
+                product.is_manual = True
+                result.updated += 1
+            elif product is not None:
+                result.updated += 1
+            else:
+                product = Product(
+                    external_id=unique_external_id(db, source.id, f"csv-{slugify(name)}"),
+                    source_id=source.id,
+                    name=name[:300],
+                    normalised_name=normalised,
+                    slug=unique_product_slug(db, name, normalised),
+                    description=row.get("description") or None,
+                    category_id=category.id if category else None,
+                    brand=(row.get("brand") or None),
+                    image_url=(row.get("image_url") or None),
+                    country="AU",
+                    currency="AUD",
+                    status="active",
+                    is_manual=True,
+                    is_synthetic=False,
+                )
+                db.add(product)
+                db.flush()
+                created = True
+                result.created += 1
+
+        try:
+            matching.add_identifiers(db, product, identifiers, source_id=source.id)
+        except matching.IdentityError as exc:
+            if created:
+                # Do not leave a half-created catalogue row behind.
+                db.delete(product)
+                db.flush()
+                result.created -= 1
+            result.rejected += 1
+            result.errors.append({"row": line_number, "issue": str(exc)})
+            continue
+        matching.add_aliases(db, product, aliases, source_id=source.id)
+        if created:
+            matching.queue_fuzzy_candidates(db, product)
 
         product.last_seen_at = utcnow()
         if category and not product.category_id:

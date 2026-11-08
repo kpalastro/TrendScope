@@ -5,13 +5,14 @@ import io
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Request, Response
 from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession, WriteUser
 from app.core.errors import ApiError
 from app.models import WatchlistEntry, utcnow
 from app.schemas import WatchlistCreate, WatchlistUpdate
+from app.services import audit
 from app.services.catalog import get_product_row, summary_payload
 
 router = APIRouter(prefix="/watchlist", tags=["watchlist"])
@@ -101,7 +102,9 @@ def export_watchlist(user: CurrentUser, db: DbSession) -> Response:
 
 
 @router.post("", status_code=201)
-def add_to_watchlist(payload: WatchlistCreate, user: WriteUser, db: DbSession) -> dict:
+def add_to_watchlist(
+    payload: WatchlistCreate, request: Request, user: WriteUser, db: DbSession
+) -> dict:
     if get_product_row(db, payload.product_id) is None:
         raise ApiError(404, "NOT_FOUND", "Product not found.")
     existing = db.execute(
@@ -121,16 +124,30 @@ def add_to_watchlist(payload: WatchlistCreate, user: WriteUser, db: DbSession) -
     )
     db.add(entry)
     db.commit()
+    audit.record(
+        db,
+        action="watchlist.create",
+        entity_type="watchlist",
+        entity_id=entry.id,
+        user=user,
+        request=request,
+        changes={"product_id": payload.product_id, "status": entry.status},
+    )
     return _entry_payload(db, entry)
 
 
 @router.patch("/{entry_id}")
 def update_watchlist(
-    entry_id: UUID, payload: WatchlistUpdate, user: WriteUser, db: DbSession
+    entry_id: UUID,
+    payload: WatchlistUpdate,
+    request: Request,
+    user: WriteUser,
+    db: DbSession,
 ) -> dict:
     entry = db.get(WatchlistEntry, entry_id)
     if entry is None or entry.user_id != user.id:
         raise ApiError(404, "NOT_FOUND", "Watchlist entry not found.")
+    before = {"status": entry.status, "priority": entry.priority}
     if payload.status is not None:
         entry.status = payload.status
     # An explicit null clears notes or priority; an omitted field leaves it alone.
@@ -140,16 +157,40 @@ def update_watchlist(
         entry.priority = payload.priority
     entry.updated_at = utcnow()
     db.commit()
+    audit.record(
+        db,
+        action="watchlist.update",
+        entity_type="watchlist",
+        entity_id=entry.id,
+        user=user,
+        request=request,
+        changes={
+            "before": before,
+            "after": {"status": entry.status, "priority": entry.priority},
+        },
+    )
     return _entry_payload(db, entry)
 
 
 @router.delete("/{entry_id}", status_code=204)
-def remove_from_watchlist(entry_id: UUID, user: WriteUser, db: DbSession) -> Response:
+def remove_from_watchlist(
+    entry_id: UUID, request: Request, user: WriteUser, db: DbSession
+) -> Response:
     entry = db.get(WatchlistEntry, entry_id)
     if entry is None or entry.user_id != user.id:
         raise ApiError(404, "NOT_FOUND", "Watchlist entry not found.")
+    product_id = entry.product_id
     db.delete(entry)
     db.commit()
+    audit.record(
+        db,
+        action="watchlist.delete",
+        entity_type="watchlist",
+        entity_id=entry_id,
+        user=user,
+        request=request,
+        changes={"product_id": product_id},
+    )
     return Response(status_code=204)
 
 

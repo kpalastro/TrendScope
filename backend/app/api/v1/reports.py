@@ -6,15 +6,16 @@ from datetime import date
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, Query, Request, Response
 from sqlalchemy import select
 
 from app.api.deps import AdminUser, CurrentUser, DbSession, WriteUser
 from app.core.errors import ApiError
 from app.models import ResearchReport
 from app.schemas import ReportCreate
+from app.services import audit
 from app.services.catalog import list_payload, query_products
-from app.services.reports import generate_weekly, report_csv
+from app.services.reports import csv_safe, generate_weekly, report_csv, report_xlsx
 
 router = APIRouter(tags=["reports"])
 
@@ -58,11 +59,27 @@ def list_reports(
 
 
 @router.post("/reports", status_code=201)
-def create_report(payload: ReportCreate, user: WriteUser, db: DbSession) -> dict:
+def create_report(
+    payload: ReportCreate, request: Request, user: WriteUser, db: DbSession
+) -> dict:
     if payload.period_end < payload.period_start:
         raise ApiError(422, "VALIDATION_ERROR", "period_end must not precede period_start.")
     report = generate_weekly(
         db, payload.country.upper(), payload.period_start, payload.period_end
+    )
+    audit.record(
+        db,
+        action="report.create",
+        entity_type="report",
+        entity_id=report.id,
+        user=user,
+        request=request,
+        changes={
+            "type": report.report_type,
+            "country": report.country,
+            "period_start": payload.period_start.isoformat(),
+            "period_end": payload.period_end.isoformat(),
+        },
     )
     return _report_payload(report)
 
@@ -80,7 +97,7 @@ def download_report(
     report_id: UUID,
     user: CurrentUser,
     db: DbSession,
-    format: Literal["csv", "json"] = "csv",
+    format: Literal["csv", "json", "xlsx"] = "csv",
 ) -> Response:
     import json
 
@@ -91,6 +108,10 @@ def download_report(
         content = json.dumps(_report_payload(report), indent=2, default=str)
         media_type = "application/json"
         filename = f"trendscope-report-{report.period_start}.json"
+    elif format == "xlsx":
+        content = report_xlsx(report)
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        filename = f"trendscope-report-{report.period_start}.xlsx"
     else:
         content = report_csv(report)
         media_type = "text/csv"
@@ -103,12 +124,24 @@ def download_report(
 
 
 @router.delete("/reports/{report_id}", status_code=204)
-def delete_report(report_id: UUID, user: AdminUser, db: DbSession) -> Response:
+def delete_report(
+    report_id: UUID, request: Request, user: AdminUser, db: DbSession
+) -> Response:
     report = db.get(ResearchReport, report_id)
     if report is None:
         raise ApiError(404, "NOT_FOUND", "Report not found.")
+    period_start = report.period_start
     db.delete(report)
     db.commit()
+    audit.record(
+        db,
+        action="report.delete",
+        entity_type="report",
+        entity_id=report_id,
+        user=user,
+        request=request,
+        changes={"period_start": period_start.isoformat()},
+    )
     return Response(status_code=204)
 
 
@@ -189,10 +222,10 @@ def export_products(
         writer.writerow(
             [
                 item["id"],
-                item["name"],
+                csv_safe(item["name"]),
                 item["slug"],
-                (item["category"] or {}).get("name"),
-                item["brand"],
+                csv_safe((item["category"] or {}).get("name")),
+                csv_safe(item["brand"]),
                 item["opportunity_score"],
                 item["classification"],
                 item["growth"]["d7"]["pct"],

@@ -91,6 +91,22 @@ METRIC_TYPES = (
 VERIFICATION_STATUSES = ("verified", "estimated", "unverified", "synthetic")
 DATA_QUALITY_LEVELS = ("high", "medium", "low", "unknown", "synthetic")
 
+# Deterministic product-identity keys and the merge-review queue. Identifiers
+# are what make deduplication safe: names are ambiguous, GTINs/ASINs are not.
+IDENTIFIER_SCHEMES = (
+    "gtin",
+    "upc",
+    "ean",
+    "isbn",
+    "asin",
+    "ebay_item",
+    "supplier_sku",
+    "mpn",
+    "shopify_sku",
+)
+MATCH_METHODS = ("identifier", "alias", "name_exact", "fuzzy")
+MATCH_STATUSES = ("pending", "merged", "rejected")
+
 
 class User(Base):
     __tablename__ = "users"
@@ -103,6 +119,30 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AuthRefreshToken(Base):
+    """Rotating refresh tokens. Only a SHA-256 hash is stored, never the token."""
+
+    __tablename__ = "auth_refresh_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    replaced_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("auth_refresh_tokens.id", ondelete="SET NULL")
+    )
+    user_agent: Mapped[str | None] = mapped_column(String(300))
+    ip: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        Index("ix_refresh_user_expires", "user_id", "expires_at"),
+    )
 
 
 class Category(Base):
@@ -201,6 +241,9 @@ class Product(Base):
     currency: Mapped[str] = mapped_column(String(3), default="AUD", nullable=False)
     attributes: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+    merged_into_product_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("products.id", ondelete="SET NULL")
+    )
     is_manual: Mapped[bool] = mapped_column(Boolean, default=False)
     is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -236,6 +279,77 @@ class ProductKeyword(Base):
             "product_id", "normalised_keyword", "source_id", name="uq_keyword_product_source"
         ),
         Index("ix_keywords_normalised", "normalised_keyword"),
+    )
+
+
+class ProductIdentifier(Base):
+    """A deterministic external identity (GTIN, ASIN, supplier SKU, …)."""
+
+    __tablename__ = "product_identifiers"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    product_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("products.id", ondelete="CASCADE"), nullable=False
+    )
+    scheme: Mapped[str] = mapped_column(String(30), nullable=False)
+    value: Mapped[str] = mapped_column(String(200), nullable=False)
+    source_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("data_sources.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("scheme", "value", name="uq_identifier_scheme_value"),
+        Index("ix_identifiers_product", "product_id"),
+    )
+
+
+class ProductAlias(Base):
+    """An alternate name observed at a source, used by the matcher."""
+
+    __tablename__ = "product_aliases"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    product_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("products.id", ondelete="CASCADE"), nullable=False
+    )
+    alias: Mapped[str] = mapped_column(String(300), nullable=False)
+    normalised_alias: Mapped[str] = mapped_column(String(300), nullable=False)
+    source_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("data_sources.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("product_id", "normalised_alias", name="uq_alias_product_normalised"),
+        Index("ix_aliases_normalised", "normalised_alias"),
+    )
+
+
+class ProductMatch(Base):
+    """A candidate duplicate awaiting an admin's merge/reject decision."""
+
+    __tablename__ = "product_matches"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    product_a_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("products.id", ondelete="CASCADE"), nullable=False
+    )
+    product_b_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("products.id", ondelete="CASCADE"), nullable=False
+    )
+    method: Mapped[str] = mapped_column(String(20), nullable=False)
+    similarity: Mapped[float | None] = mapped_column(Numeric(4, 3))
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL")
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("product_a_id", "product_b_id", name="uq_match_pair"),
+        Index("ix_matches_status", "status"),
     )
 
 
@@ -482,6 +596,31 @@ class WatchlistEntry(Base):
     )
 
 
+class ProfitScenario(Base):
+    """A saved profit-calculation snapshot for a product or a standalone case."""
+
+    __tablename__ = "profit_scenarios"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    product_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("products.id", ondelete="SET NULL")
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), default="AUD", nullable=False)
+    inputs: Mapped[dict] = mapped_column(JSON, nullable=False)
+    outputs: Mapped[dict] = mapped_column(JSON, nullable=False)
+    assumptions_version: Mapped[str] = mapped_column(String(30), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    __table_args__ = (Index("ix_profit_scenarios_user", "user_id", "updated_at"),)
+
+
 class ResearchReport(Base):
     __tablename__ = "research_reports"
 
@@ -523,14 +662,19 @@ class AuditLog(Base):
 
 __all__ = [
     "AuditLog",
+    "AuthRefreshToken",
     "Category",
     "DataSource",
     "IngestionRun",
     "MarketplaceListing",
     "OpportunityScore",
     "Product",
+    "ProductAlias",
+    "ProductIdentifier",
     "ProductKeyword",
+    "ProductMatch",
     "ProductMetric",
+    "ProfitScenario",
     "ResearchReport",
     "ScoringProfile",
     "Supplier",

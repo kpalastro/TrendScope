@@ -8,6 +8,7 @@ from app.api.v1 import (
     discovery,
     health,
     products,
+    profit,
     reports,
     scoring,
     sources,
@@ -27,5 +28,6 @@ for module in (
     sources,
     scoring,
     reports,
+    profit,
 ):
     api_router.include_router(module.router)

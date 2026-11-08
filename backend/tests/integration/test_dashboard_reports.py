@@ -52,6 +52,21 @@ def test_weekly_report_generation_and_download(client, auth_headers, synced):
     assert "top_growth" in csv_response.text
     assert "disclaimer" in csv_response.text
 
+    xlsx_response = client.get(
+        f"/api/v1/reports/{report['id']}/download?format=xlsx", headers=auth_headers
+    )
+    assert xlsx_response.status_code == 200
+    assert xlsx_response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(BytesIO(xlsx_response.content))
+    assert workbook.sheetnames == ["Summary", "Products", "Sources", "Limitations"]
+    assert workbook["Summary"]["A1"].value == "Field"
+
 
 def test_report_rejects_inverted_period(client, auth_headers, synced):
     response = client.post(

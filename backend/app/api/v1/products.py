@@ -7,7 +7,7 @@ from datetime import date
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, File, Query, Response, UploadFile
+from fastapi import APIRouter, File, Query, Request, Response, UploadFile
 from sqlalchemy import select
 
 from app.api.deps import AdminUser, CurrentUser, DbSession, WriteUser
@@ -19,7 +19,10 @@ from app.models import (
     MarketplaceListing,
     OpportunityScore,
     Product,
+    ProductAlias,
+    ProductIdentifier,
     ProductKeyword,
+    ProductMatch,
     ProductMetric,
     Supplier,
     SupplierProduct,
@@ -27,6 +30,8 @@ from app.models import (
     utcnow,
 )
 from app.schemas import (
+    MatchResolveRequest,
+    MergeRequest,
     ObservationCorrect,
     ObservationCreate,
     ProductCreate,
@@ -34,7 +39,7 @@ from app.schemas import (
     SupplierOfferCreate,
     SupplierOfferPatch,
 )
-from app.services import importing
+from app.services import audit, importing, matching
 from app.services.catalog import (
     get_product_row,
     list_payload,
@@ -235,6 +240,7 @@ def csv_template(user: CurrentUser) -> Response:
 
 @router.post("/import/csv", status_code=202)
 async def import_csv(
+    request: Request,
     user: WriteUser,
     db: DbSession,
     file: UploadFile = File(...),
@@ -252,6 +258,18 @@ async def import_csv(
     except UnicodeDecodeError as exc:
         raise ApiError(422, "VALIDATION_ERROR", "CSV must be UTF-8 encoded.") from exc
     result = importing.import_csv(db, source, content)
+    audit.record(
+        db,
+        action="product.import_csv",
+        entity_type="product",
+        user=user,
+        request=request,
+        changes={
+            "created": result.created,
+            "updated": result.updated,
+            "rejected": result.rejected,
+        },
+    )
     return {
         "job": {
             "id": f"import-{utcnow().strftime('%Y%m%d%H%M%S')}",
@@ -324,7 +342,12 @@ def list_products(
 
 
 @router.post("", status_code=201)
-def create_product(payload: ProductCreate, user: WriteUser, db: DbSession) -> dict:
+def create_product(
+    payload: ProductCreate,
+    request: Request,
+    user: WriteUser,
+    db: DbSession,
+) -> dict:
     source = db.execute(
         select(DataSource).where(DataSource.provider_key == "csv_import")
     ).scalar_one_or_none()
@@ -333,6 +356,23 @@ def create_product(payload: ProductCreate, user: WriteUser, db: DbSession) -> di
     category = db.get(Category, payload.category_id) if payload.category_id else None
     if payload.category_id and category is None:
         raise ApiError(422, "VALIDATION_ERROR", "Unknown category_id.")
+
+    try:
+        for scheme, value in payload.identifiers.items():
+            matching.validate_identifier(scheme, value)
+    except matching.IdentityError as exc:
+        raise ApiError(422, "VALIDATION_ERROR", str(exc)) from exc
+    # A deterministic identifier is stronger evidence than the name: refuse to
+    # create a second row for a GTIN that already exists.
+    owned = matching.find_by_identifier(db, payload.identifiers) if payload.identifiers else None
+    if owned is not None and owned.status != "merged":
+        raise ApiError(
+            409,
+            "CONFLICT",
+            f"That identifier already belongs to product {owned.id}. "
+            "Open that product or record an alias instead.",
+        )
+
     normalised = normalise_name(payload.name)
     candidates = (
         db.execute(select(Product).where(Product.normalised_name == normalised)).scalars().all()
@@ -375,6 +415,14 @@ def create_product(payload: ProductCreate, user: WriteUser, db: DbSession) -> di
         )
         db.add(product)
         db.flush()
+
+    try:
+        matching.add_identifiers(db, product, payload.identifiers, source_id=source.id)
+    except matching.IdentifierConflict as exc:
+        raise ApiError(409, "CONFLICT", str(exc)) from exc
+    except matching.IdentityError as exc:
+        raise ApiError(422, "VALIDATION_ERROR", str(exc)) from exc
+    matching.add_aliases(db, product, payload.aliases, source_id=source.id)
 
     seen_keywords: set[str] = set()
     for keyword in payload.keywords:
@@ -433,7 +481,17 @@ def create_product(payload: ProductCreate, user: WriteUser, db: DbSession) -> di
     profile = get_active_profile(db)
     if profile is not None:
         compute_product_score(db, product, metric, profile, date.today())
+    matching.queue_fuzzy_candidates(db, product)
     db.commit()
+    audit.record(
+        db,
+        action="product.create",
+        entity_type="product",
+        entity_id=product.id,
+        user=user,
+        request=request,
+        changes={"name": product.name, "identifiers": list(payload.identifiers)},
+    )
     row = _require_row(db, product.id)
     return detail_payload(db, row)
 
@@ -524,6 +582,7 @@ def observation_template(user: CurrentUser) -> Response:
 
 @router.post("/import/observations/csv", status_code=202)
 async def import_observations_csv(
+    request: Request,
     user: WriteUser,
     db: DbSession,
     file: UploadFile = File(...),
@@ -632,6 +691,14 @@ async def import_observations_csv(
     if created:
         source.last_success_at = utcnow()
     db.commit()
+    audit.record(
+        db,
+        action="observation.import_csv",
+        entity_type="observation",
+        user=user,
+        request=request,
+        changes={"created": created, "skipped": skipped, "rejected": len(errors)},
+    )
     return {
         "created": created,
         "skipped": skipped,
@@ -668,6 +735,7 @@ def product_observations(
 def create_product_observation(
     identifier: str,
     payload: ObservationCreate,
+    request: Request,
     user: WriteUser,
     db: DbSession,
 ) -> dict:
@@ -720,6 +788,19 @@ def create_product_observation(
     _recompute(db, row.product)
     source.last_success_at = utcnow()
     db.commit()
+    audit.record(
+        db,
+        action="observation.create",
+        entity_type="observation",
+        entity_id=observation.id,
+        user=user,
+        request=request,
+        changes={
+            "product_id": row.product.id,
+            "metric_name": observation.metric_name,
+            "value": as_float(observation.metric_value),
+        },
+    )
     fresh = _require_row(db, row.product.id)
     return {
         "observation": _observation_payload(observation),
@@ -732,6 +813,7 @@ def correct_product_observation(
     identifier: str,
     observation_id: int,
     payload: ObservationCorrect,
+    request: Request,
     user: WriteUser,
     db: DbSession,
 ) -> dict:
@@ -779,6 +861,15 @@ def correct_product_observation(
     db.flush()
     _recompute(db, row.product)
     db.commit()
+    audit.record(
+        db,
+        action="observation.correct",
+        entity_type="observation",
+        entity_id=observation.id,
+        user=user,
+        request=request,
+        changes={"product_id": row.product.id, "correction": changes},
+    )
     fresh = _require_row(db, row.product.id)
     return {
         "observation": _observation_payload(observation),
@@ -790,6 +881,7 @@ def correct_product_observation(
 def add_product_supplier(
     identifier: str,
     payload: SupplierOfferCreate,
+    request: Request,
     user: WriteUser,
     db: DbSession,
 ) -> dict:
@@ -847,6 +939,19 @@ def add_product_supplier(
     _recompute(db, row.product)
     source.last_success_at = utcnow()
     db.commit()
+    audit.record(
+        db,
+        action="supplier_offer.create",
+        entity_type="supplier_offer",
+        entity_id=offer.id,
+        user=user,
+        request=request,
+        changes={
+            "product_id": row.product.id,
+            "supplier_id": supplier.id,
+            "product_cost": str(payload.product_cost),
+        },
+    )
     fresh = _require_row(db, row.product.id)
     return {
         "created": created,
@@ -861,6 +966,7 @@ def patch_product_supplier(
     identifier: str,
     offer_id: UUID,
     payload: SupplierOfferPatch,
+    request: Request,
     user: WriteUser,
     db: DbSession,
 ) -> dict:
@@ -902,10 +1008,182 @@ def patch_product_supplier(
     db.flush()
     _recompute(db, row.product)
     db.commit()
+    audit.record(
+        db,
+        action="supplier_offer.update",
+        entity_type="supplier_offer",
+        entity_id=offer.id,
+        user=user,
+        request=request,
+        changes={"product_id": row.product.id},
+    )
     fresh = _require_row(db, row.product.id)
     return {
         "suppliers": _suppliers(db, row.product.id),
         "recommendation": _recommendation(db, fresh),
+    }
+
+
+def _match_product_payload(product: Product) -> dict:
+    return {
+        "id": product.id,
+        "name": product.name,
+        "slug": product.slug,
+        "brand": product.brand,
+        "status": product.status,
+        "is_synthetic": bool(product.is_synthetic),
+        "first_seen_at": product.first_seen_at,
+        "merged_into_product_id": product.merged_into_product_id,
+    }
+
+
+def _match_payload(db, match: ProductMatch) -> dict:
+    return {
+        "id": match.id,
+        "method": match.method,
+        "similarity": as_float(match.similarity),
+        "status": match.status,
+        "created_at": match.created_at,
+        "reviewed_at": match.reviewed_at,
+        "product_a": _match_product_payload(db.get(Product, match.product_a_id)),
+        "product_b": _match_product_payload(db.get(Product, match.product_b_id)),
+    }
+
+
+@router.get("/matches")
+def list_product_matches(
+    user: AdminUser,
+    db: DbSession,
+    status: Literal["pending", "merged", "rejected", "all"] = "pending",
+    limit: int = 50,
+) -> dict:
+    """Review queue for possible duplicates. Fuzzy hits are never auto-merged."""
+
+    stmt = select(ProductMatch).order_by(ProductMatch.created_at.desc())
+    if status != "all":
+        stmt = stmt.where(ProductMatch.status == status)
+    rows = db.execute(stmt.limit(max(1, min(limit, 200)))).scalars().all()
+    count_stmt = select(ProductMatch.id)
+    if status != "all":
+        count_stmt = count_stmt.where(ProductMatch.status == status)
+    total = db.execute(count_stmt).all()
+    return {
+        "data": [_match_payload(db, match) for match in rows],
+        "meta": {"total": len(total), "status": status},
+    }
+
+
+@router.post("/matches/{match_id}/resolve")
+def resolve_product_match(
+    match_id: UUID,
+    payload: MatchResolveRequest,
+    request: Request,
+    user: AdminUser,
+    db: DbSession,
+) -> dict:
+    match = db.get(ProductMatch, match_id)
+    if match is None:
+        raise ApiError(404, "NOT_FOUND", "Product match not found.")
+    if match.status != "pending":
+        raise ApiError(409, "CONFLICT", f"This match was already {match.status}.")
+
+    first = db.get(Product, match.product_a_id)
+    second = db.get(Product, match.product_b_id)
+    if first is None or second is None:
+        raise ApiError(404, "NOT_FOUND", "One of the matched products no longer exists.")
+
+    if payload.action == "reject":
+        match.status = "rejected"
+        match.reviewed_by = user.id
+        match.reviewed_at = utcnow()
+        db.commit()
+        audit.record(
+            db,
+            action="product_match.reject",
+            entity_type="product_match",
+            entity_id=match.id,
+            user=user,
+            request=request,
+        )
+        return {"match": _match_payload(db, match)}
+
+    # Deterministic rule: the older catalogue row survives, so history and the
+    # public slug stay stable. Ties break on the canonical pair order.
+    if first.first_seen_at and second.first_seen_at:
+        keep, drop = (first, second) if first.first_seen_at <= second.first_seen_at else (second, first)
+    else:
+        keep, drop = first, second
+    try:
+        summary = matching.merge_products(
+            db,
+            drop,
+            keep,
+            method=match.method,
+            reviewed_by=user.id,
+        )
+        matching.recompute_after_merge(db, matching.resolve_root(db, keep))
+    except matching.IdentityError as exc:
+        raise ApiError(409, "CONFLICT", str(exc)) from exc
+    db.commit()
+    audit.record(
+        db,
+        action="product.merge",
+        entity_type="product",
+        entity_id=drop.id,
+        user=user,
+        request=request,
+        changes=summary.as_dict(),
+    )
+    return {
+        "match": _match_payload(db, match),
+        "merge": summary.as_dict(),
+        "product": detail_payload(db, _require_row(db, summary.target_id)),
+    }
+
+
+@router.post("/{identifier}/merge")
+def merge_product(
+    identifier: str,
+    payload: MergeRequest,
+    request: Request,
+    user: AdminUser,
+    db: DbSession,
+) -> dict:
+    row = _require_row(db, identifier)
+    source = row.product
+    target = db.get(Product, payload.into_product_id)
+    if target is None:
+        raise ApiError(404, "NOT_FOUND", "Target product not found.")
+    if source.id == target.id:
+        raise ApiError(422, "VALIDATION_ERROR", "A product cannot be merged into itself.")
+    if source.status == "merged" and source.merged_into_product_id == target.id:
+        return {
+            "merge": {
+                "source_id": source.id,
+                "target_id": target.id,
+                "already_merged": True,
+            },
+            "product": detail_payload(db, _require_row(db, target.id)),
+        }
+    try:
+        summary = matching.merge_products(db, source, target, method="manual")
+        survivor = matching.resolve_root(db, target)
+        matching.recompute_after_merge(db, survivor)
+    except matching.IdentityError as exc:
+        raise ApiError(409, "CONFLICT", str(exc)) from exc
+    db.commit()
+    audit.record(
+        db,
+        action="product.merge",
+        entity_type="product",
+        entity_id=source.id,
+        user=user,
+        request=request,
+        changes=summary.as_dict(),
+    )
+    return {
+        "merge": summary.as_dict(),
+        "product": detail_payload(db, _require_row(db, summary.target_id)),
     }
 
 
@@ -915,9 +1193,21 @@ def get_product(identifier: str, user: CurrentUser, db: DbSession) -> dict:
 
 
 @router.patch("/{identifier}")
-def patch_product(identifier: str, payload: ProductPatch, user: WriteUser, db: DbSession) -> dict:
+def patch_product(
+    identifier: str,
+    payload: ProductPatch,
+    request: Request,
+    user: WriteUser,
+    db: DbSession,
+) -> dict:
     row = _require_row(db, identifier)
     product = row.product
+    before = {
+        "name": product.name,
+        "category_id": str(product.category_id) if product.category_id else None,
+        "brand": product.brand,
+        "status": product.status,
+    }
     if payload.name is not None:
         product.name = payload.name
         product.normalised_name = normalise_name(payload.name)
@@ -934,15 +1224,38 @@ def patch_product(identifier: str, payload: ProductPatch, user: WriteUser, db: D
         product.status = payload.status
     product.updated_at = utcnow()
     db.commit()
+    audit.record(
+        db,
+        action="product.update",
+        entity_type="product",
+        entity_id=product.id,
+        user=user,
+        request=request,
+        changes={
+            "before": before,
+            "after": {"name": product.name, "status": product.status},
+        },
+    )
     return detail_payload(db, _require_row(db, product.id))
 
 
 @router.delete("/{identifier}", status_code=204)
-def archive_product(identifier: str, user: AdminUser, db: DbSession) -> Response:
+def archive_product(
+    identifier: str, request: Request, user: AdminUser, db: DbSession
+) -> Response:
     product = _require_row(db, identifier).product
     product.status = "archived"
     product.updated_at = utcnow()
     db.commit()
+    audit.record(
+        db,
+        action="product.archive",
+        entity_type="product",
+        entity_id=product.id,
+        user=user,
+        request=request,
+        changes={"name": product.name, "status": "archived"},
+    )
     return Response(status_code=204)
 
 

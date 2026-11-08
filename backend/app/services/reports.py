@@ -1,4 +1,4 @@
-"""Weekly research report generation and CSV exports."""
+"""Weekly research report generation and CSV/XLSX exports."""
 
 from __future__ import annotations
 
@@ -6,6 +6,9 @@ import csv
 import io
 from datetime import date, datetime, timedelta, timezone
 
+from openpyxl import Workbook
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -226,6 +229,19 @@ def generate_weekly(
     return report
 
 
+def csv_safe(value):
+    """Neutralise spreadsheet formula injection without changing numbers.
+
+    A name such as ``=HYPERLINK(...)`` is data, not a formula. Prefixing a
+    string cell that starts with a formula trigger with ``'`` keeps the text
+    visible while Excel and Sheets treat it as literal.
+    """
+
+    if isinstance(value, str) and value[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + value
+    return value
+
+
 def report_csv(report: ResearchReport) -> str:
     data = report.report_data or {}
     buffer = io.StringIO()
@@ -251,8 +267,8 @@ def report_csv(report: ResearchReport) -> str:
             writer.writerow(
                 [
                     section,
-                    item.get("name"),
-                    item.get("category"),
+                    csv_safe(item.get("name")),
+                    csv_safe(item.get("category")),
                     item.get("opportunity_score"),
                     item.get("classification"),
                     item.get("growth_7d_pct"),
@@ -266,4 +282,116 @@ def report_csv(report: ResearchReport) -> str:
             )
     writer.writerow([])
     writer.writerow(["disclaimer", DISCLAIMER])
+    return buffer.getvalue()
+
+
+REPORT_ITEM_HEADERS = [
+    "section",
+    "name",
+    "category",
+    "opportunity_score",
+    "classification",
+    "growth_7d_pct",
+    "growth_30d_pct",
+    "growth_reason_30d",
+    "competition_class",
+    "trend_direction",
+    "estimated_margin_pct",
+    "synthetic",
+]
+
+
+def _report_items(data: dict) -> list[list]:
+    rows: list[list] = []
+    for section in ("top_growth", "top_opportunities", "emerging"):
+        for item in data.get(section, []):
+            rows.append(
+                [
+                    section,
+                    item.get("name"),
+                    item.get("category"),
+                    item.get("opportunity_score"),
+                    item.get("classification"),
+                    item.get("growth_7d_pct"),
+                    item.get("growth_30d_pct"),
+                    item.get("growth_reason_30d"),
+                    item.get("competition_class"),
+                    item.get("trend_direction"),
+                    item.get("estimated_margin_pct"),
+                    item.get("is_synthetic"),
+                ]
+            )
+    return rows
+
+
+def _write_sheet(worksheet, headers: list[str], rows: list[list]) -> None:
+    worksheet.append(headers)
+    for cell in worksheet[1]:
+        cell.font = Font(bold=True)
+    for row in rows:
+        worksheet.append(row)
+        for cell in worksheet[worksheet.max_row]:
+            # openpyxl tags a string beginning with "=" as a formula. Force a
+            # shared string so imported names can never execute in the workbook.
+            if isinstance(cell.value, str) and cell.value[:1] in ("=", "+", "-", "@"):
+                cell.data_type = "s"
+    worksheet.freeze_panes = "A2"
+    for index, header in enumerate(headers, start=1):
+        width = max(len(str(header)), 12)
+        for row in rows:
+            value = row[index - 1] if index - 1 < len(row) else None
+            width = max(width, len(str(value)) if value is not None else 0)
+        worksheet.column_dimensions[get_column_letter(index)].width = min(width + 2, 60)
+
+
+def report_xlsx(report: ResearchReport) -> bytes:
+    """A workbook an operator can filter and forward without a converter."""
+
+    data = report.report_data or {}
+    workbook = Workbook()
+
+    summary = workbook.active
+    summary.title = "Summary"
+    summary_rows = [
+        ["Report type", report.report_type],
+        ["Country", report.country],
+        ["Period start", report.period_start.isoformat()],
+        ["Period end", report.period_end.isoformat()],
+        ["Status", report.status],
+        ["Generated at", report.generated_at.isoformat() if report.generated_at else None],
+        ["New products", data.get("new_products")],
+        ["Summary", report.summary],
+        ["Disclaimer", data.get("disclaimer", DISCLAIMER)],
+    ]
+    _write_sheet(summary, ["Field", "Value"], summary_rows)
+
+    products = workbook.create_sheet("Products")
+    _write_sheet(products, REPORT_ITEM_HEADERS, _report_items(data))
+
+    sources = workbook.create_sheet("Sources")
+    source_rows = [
+        [
+            item.get("provider_key"),
+            item.get("provider_name"),
+            item.get("collection_date"),
+            item.get("is_synthetic"),
+            item.get("sync_status"),
+        ]
+        for item in data.get("sources", [])
+    ]
+    _write_sheet(
+        sources,
+        ["provider_key", "provider_name", "collection_date", "synthetic", "sync_status"],
+        source_rows,
+    )
+
+    limitations = workbook.create_sheet("Limitations")
+    _write_sheet(
+        limitations,
+        ["Limitation"],
+        [[item] for item in data.get("limitations", LIMITATIONS)],
+    )
+
+    buffer = io.BytesIO()
+    workbook.save(buffer)
     return buffer.getvalue()

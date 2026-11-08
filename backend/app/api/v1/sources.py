@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from uuid import UUID
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from sqlalchemy import select
 
 from app.api.deps import AdminUser, CurrentUser, DbSession, WriteUser
@@ -12,6 +12,7 @@ from app.connectors.registry import get_connector
 from app.core.errors import ApiError
 from app.models import DataSource, IngestionRun
 from app.schemas import SourcePatch
+from app.services import audit
 from app.services.ingestion import get_source, run_connector_sync, run_mock_sync
 
 router = APIRouter(tags=["sources"])
@@ -162,11 +163,16 @@ def list_sources(user: CurrentUser, db: DbSession) -> dict:
 
 @router.patch("/data-sources/{source_id}")
 def patch_source(
-    source_id: UUID, payload: SourcePatch, user: AdminUser, db: DbSession
+    source_id: UUID,
+    payload: SourcePatch,
+    request: Request,
+    user: AdminUser,
+    db: DbSession,
 ) -> dict:
     source = db.get(DataSource, source_id)
     if source is None:
         raise ApiError(404, "NOT_FOUND", "Data source not found.")
+    before = {"enabled": source.enabled, "cost_model": source.cost_model}
     if payload.enabled is not None:
         source.enabled = payload.enabled
     if payload.config is not None:
@@ -188,6 +194,18 @@ def patch_source(
     if payload.terms_url is not None:
         source.terms_url = payload.terms_url
     db.commit()
+    audit.record(
+        db,
+        action="data_source.update",
+        entity_type="data_source",
+        entity_id=source.id,
+        user=user,
+        request=request,
+        changes={
+            "before": before,
+            "after": {"enabled": source.enabled, "cost_model": source.cost_model},
+        },
+    )
     return _source_payload(source)
 
 
@@ -219,7 +237,9 @@ def test_connection(source_id: UUID, user: AdminUser, db: DbSession) -> dict:
 
 
 @router.post("/data-sources/{source_id}/sync", status_code=202)
-def sync_source(source_id: UUID, user: WriteUser, db: DbSession) -> dict:
+def sync_source(
+    source_id: UUID, request: Request, user: WriteUser, db: DbSession
+) -> dict:
     source = db.get(DataSource, source_id)
     if source is None:
         raise ApiError(404, "NOT_FOUND", "Data source not found.")
@@ -271,6 +291,19 @@ def sync_source(source_id: UUID, user: WriteUser, db: DbSession) -> dict:
     except Exception as exc:  # noqa: BLE001 - provider failure surfaces in the job
         db.rollback()
         raise ApiError(502, "PROVIDER_ERROR", f"Sync failed: {type(exc).__name__}") from exc
+    audit.record(
+        db,
+        action="data_source.sync",
+        entity_type="data_source",
+        entity_id=source.id,
+        user=user,
+        request=request,
+        changes={
+            "run_id": str(run.id),
+            "records_fetched": run.records_fetched,
+            "records_written": run.records_written,
+        },
+    )
     return {"job": _job_payload(run), "run": _run_payload(run)}
 
 

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request, Response
 from sqlalchemy import select
 
 from app.api.deps import AdminUser, CurrentUser, DbSession
 from app.core.errors import ApiError
 from app.models import Category, Product
+from app.services import audit
 from app.services.catalog import category_counts
 from app.services.presenters import category_payload
 from app.services.normalise import slugify
@@ -53,7 +54,9 @@ def list_categories(user: CurrentUser, db: DbSession, tree: bool = False) -> dic
 
 
 @router.post("", status_code=201)
-def create_category(payload: dict, user: AdminUser, db: DbSession) -> dict:
+def create_category(
+    payload: dict, request: Request, user: AdminUser, db: DbSession
+) -> dict:
     name = str(payload.get("name", "")).strip()
     if len(name) < 2:
         raise ApiError(422, "VALIDATION_ERROR", "name is required")
@@ -80,26 +83,51 @@ def create_category(payload: dict, user: AdminUser, db: DbSession) -> dict:
     )
     db.add(category)
     db.commit()
+    audit.record(
+        db,
+        action="category.create",
+        entity_type="category",
+        entity_id=category.id,
+        user=user,
+        request=request,
+        changes={"name": category.name, "path": category.path},
+    )
     return category_payload(category, 0)
 
 
 @router.patch("/{category_id}")
-def patch_category(category_id: UUID, payload: dict, user: AdminUser, db: DbSession) -> dict:
+def patch_category(
+    category_id: UUID,
+    payload: dict,
+    request: Request,
+    user: AdminUser,
+    db: DbSession,
+) -> dict:
     category = db.get(Category, category_id)
     if category is None:
         raise ApiError(404, "NOT_FOUND", "Category not found.")
+    before = {"name": category.name, "is_active": category.is_active}
     if "name" in payload and payload["name"]:
         category.name = str(payload["name"])[:160]
     if payload.get("is_active") is not None:
         category.is_active = bool(payload["is_active"])
     db.commit()
+    audit.record(
+        db,
+        action="category.update",
+        entity_type="category",
+        entity_id=category.id,
+        user=user,
+        request=request,
+        changes={"before": before, "after": {"name": category.name, "is_active": category.is_active}},
+    )
     return category_payload(category)
 
 
 @router.delete("/{category_id}", status_code=204)
-def delete_category(category_id: UUID, user: AdminUser, db: DbSession):
-    from fastapi import Response
-
+def delete_category(
+    category_id: UUID, request: Request, user: AdminUser, db: DbSession
+) -> Response:
     category = db.get(Category, category_id)
     if category is None:
         raise ApiError(404, "NOT_FOUND", "Category not found.")
@@ -113,6 +141,16 @@ def delete_category(category_id: UUID, user: AdminUser, db: DbSession):
         raise ApiError(
             422, "BUSINESS_RULE_VIOLATION", "Only an empty category can be deleted."
         )
+    name, path = category.name, category.path
     db.delete(category)
     db.commit()
+    audit.record(
+        db,
+        action="category.delete",
+        entity_type="category",
+        entity_id=category_id,
+        user=user,
+        request=request,
+        changes={"name": name, "path": path},
+    )
     return Response(status_code=204)
