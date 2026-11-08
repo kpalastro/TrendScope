@@ -25,9 +25,11 @@ Phases 2–4 proceed per [`05-implementation-plan.md`](05-implementation-plan.md
 1. **The repository is empty.** This is greenfield. No existing conventions to preserve; the stack in
    PRD §6 is adopted as-is.
 2. **Google Trends has no public API.** The official API has been in application-only alpha since
-   July 2025, and `pytrends` was archived in April 2025. Phase 1 therefore needs a licensed
-   intermediary (DataForSEO recommended, ~US$0.011/query) behind a connector interface, plus a mock.
-   This is the only recurring data cost in the MVP.
+   July 2025, and `pytrends` was archived in April 2025. Phase 1 therefore uses the free routes:
+   manual CSV export and the public BigQuery `google_trends` dataset, behind a connector interface,
+   with a deterministic mock. A paid intermediary (DataForSEO, ~US$0.011/query) remains a Phase 2
+   option once usage shows the free route is the limiting factor. See
+   [`06-free-first-gap-analysis.md`](06-free-first-gap-analysis.md).
 3. **Amazon Australia is not reachable through a legitimate first-party API.** PA-API 5.0 is being
    retired in favour of the Creators API, which has no bestseller endpoint and no `amazon.com.au`
    domain; Keepa has no AU catalogue either. Amazon data is mock-only until a licensed vendor and a
@@ -50,5 +52,6 @@ anyway (§4.4).
   `cj_dropshipping`, `aliexpress`, `alibaba`, `csv_import`, `manual`, `mock`.
 - Score components: `demand`, `marketplace`, `social`, `competition`, `profitability`, `seasonal`.
 - Growth windows: `7d`, `30d`, `90d`, `180d`, `365d`.
-- API and DB fields are `snake_case`; TypeScript types are generated from OpenAPI, so no manual
-  camelCase layer exists.
+- API and DB fields are `snake_case`; the TypeScript types in `frontend/src/lib/types.ts` mirror
+  the API contract by hand, so no camelCase translation layer exists. Regenerating them from
+  OpenAPI remains a follow-up (see `05-implementation-plan.md` M2).

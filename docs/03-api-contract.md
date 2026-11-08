@@ -40,12 +40,18 @@
 
 ## 2. Authentication and authorisation
 
-- `POST /auth/login` returns a short-lived access token (15 min) and sets a rotating refresh token in
-  an `HttpOnly; Secure; SameSite=Lax` cookie scoped to `/api/v1/auth`.
+- `POST /auth/login` returns an access token (default 480 min, `ACCESS_TOKEN_MINUTES`) and sets an
+  opaque rotating refresh token in an `HttpOnly; SameSite=Lax` cookie (`Secure` outside
+  development). The cookie is scoped to `/` so it also covers the Next.js rewrite at
+  `/api/backend/auth/*`; only the server sees its value.
+- Refresh tokens are single-use. `POST /auth/refresh` rotates the cookie and returns a new access
+  token; replaying an already-rotated token is treated as theft and revokes every active session for
+  that user.
 - Access tokens are JWTs (`sub`, `role`, `exp`, `jti`), HS256 in dev and RS256-ready in config.
 - Roles: `admin` (sources, scoring profiles, merges, users), `analyst` (all research, watchlist,
   reports), `viewer` (read-only).
 - All endpoints except `/auth/login`, `/auth/refresh`, `/health` require a token.
+- `POST /auth/logout` revokes the presented refresh token, clears the cookie and is idempotent.
 - Every mutating request is written to `audit_logs` with actor, entity, diff and `request_id`.
 - Failed logins are rate-limited per IP and per email (5/min, exponential lockout).
 
@@ -299,6 +305,18 @@ seasonal | best_margins | recently_discovered`. Common params: `country=AU` (def
 | GET | `/products/import/observations/template` | V | observation CSV template |
 | POST | `/products/discover` | N | run discovery connectors → 202 `Job` |
 
+`POST /products` accepts an optional `identifiers` map (`gtin`, `upc`, `ean`, `isbn`, `asin`,
+`ebay_item`, `supplier_sku`, `mpn`, `shopify_sku`) and `aliases`. Values are normalised and a value
+already owned by another product returns `409`. New products are queued for fuzzy review rather
+than merged automatically.
+
+Merges are non-destructive: the source is tombstoned (`status: "merged"`, `merged_into_product_id`),
+its observations, metrics, scores, keywords, identifiers, aliases and watchlist entries move to the
+survivor, and rows that share a natural key with the survivor are dropped and counted. The older
+product (`first_seen_at`) survives. `POST /products/matches/{id}/resolve` accepts `merge` or
+`reject`; resolving the same match twice returns `409`. `GET /products/matches` accepts
+`?status=pending|merged|rejected|all` (default `pending`).
+
 `GET /products` query parameters:
 
 | Param | Type | Notes |
@@ -437,29 +455,43 @@ Response:
 
 ```json
 {
-  "inputs": { "...echoed..." },
-  "assumptions_version": "2026-11-01",
+  "inputs": { "...echoed after normalisation..." },
+  "assumptions_version": "2026-11",
   "outputs": {
-    "landed_cost_ex_gst": "14.73",
-    "landed_cost_cash": "16.20",
+    "landed_cost_ex_gst": "15.50",
+    "landed_cost_cash": "17.05",
+    "gst_on_landed_cost": "1.55",
     "selling_price_ex_gst": "63.59",
-    "gross_profit": "48.86",
-    "gross_margin_pct": 76.8,
-    "contribution_margin": "27.11",
-    "contribution_margin_pct": 42.6,
-    "break_even_ad_cost": "39.11",
-    "profit_per_order": "26.31",
+    "gst_remitted_per_sale": "6.36",
+    "gross_profit": "48.09",
+    "gross_margin_pct": 75.63,
+    "payment_fees": "1.52",
+    "returns_allowance": "2.10",
+    "contribution_margin": "34.77",
+    "contribution_margin_pct": 54.67,
+    "break_even_ad_cost": "34.77",
+    "advertising_cost_per_order": "12.00",
+    "profit_per_order": "22.77",
+    "profit_margin_pct": 35.8,
     "monthly": [
-      {"orders": 100, "profit": "2631.00", "revenue_ex_gst": "6359.00"},
-      {"orders": 500, "profit": "13155.00", "revenue_ex_gst": "31795.00"}
+      {"orders": 100, "revenue_ex_gst": "6359.09", "gross_profit": "4809.09", "advertising_spend": "1200.00", "profit": "2276.83"},
+      {"orders": 500, "revenue_ex_gst": "31795.45", "gross_profit": "24045.45", "advertising_spend": "6000.00", "profit": "11384.14"}
     ]
   },
-  "warnings": ["GST on low-value imported goods depends on supplier registration; verify."],
-  "disclaimer": "Estimate only. Excludes income tax, wastage beyond return rate, and FX movement."
+  "warnings": [
+    "Import duty is set to 0%. Confirm the tariff classification before relying on this margin.",
+    "Returns are provisioned at 3.00% of the GST-inclusive selling price."
+  ],
+  "disclaimer": "Estimate only. Excludes income tax, FX movement, storage and wastage beyond the return allowance. Confirm supplier GST registration, tariff classification and marketplace fees before committing stock."
 }
 ```
 
-Decimal strings keep the arithmetic audit-proof.
+These are the outputs for the default request above. Decimal strings keep the arithmetic
+audit-proof; percentages are rounded half-up to two decimal places. `break_even_ad_cost` is the
+advertising spend at which profit is zero, and `profit_per_order` deducts the advertising input.
+A scenario stores the normalised inputs and the computed outputs together, so the saved view stays
+reproducible after assumptions change. Reloading a scenario into the calculator recalculates it
+against the current API.
 
 ### 6.10 Data sources and synchronisation
 
@@ -527,6 +559,10 @@ presented as a quote.
 | POST | `/scoring-profiles/{id}/activate` | A | set default for its country |
 | POST | `/scores/recalculate` | A | `{product_id?|all: true, as_of_date?}` → 202 |
 
+`POST /scores/recalculate` requires exactly one of `product_id` or `all: true`, rejects a future
+`as_of_date` (`422`) and returns `202` with a synchronous `job` record plus the number of products
+scored. Unknown or merged products are rejected rather than silently skipped.
+
 Weights validation error example is in §3.
 
 ### 6.12 Reports and exports
@@ -534,9 +570,9 @@ Weights validation error example is in §3.
 | Method | Path | Access | Purpose |
 |---|---|---|---|
 | GET | `/reports` | V | `?type=&country=&from=&to=` |
-| POST | `/reports` | N | `{type, country, period_start, period_end}` → 202 |
+| POST | `/reports` | N | `{type, country, period_start, period_end}` → 201 |
 | GET | `/reports/{id}` | V | status + structured data + available formats |
-| GET | `/reports/{id}/download` | V | `?format=csv|xlsx|pdf` → file |
+| GET | `/reports/{id}/download` | V | `?format=csv|json|xlsx` → file (XLSX: Summary, Products, Sources, Limitations) |
 | DELETE | `/reports/{id}` | A | delete report + artefacts |
 | GET | `/exports/products` | V | current explorer filters → CSV stream |
 | GET | `/exports/watchlist` | V | CSV |

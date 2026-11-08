@@ -4,8 +4,8 @@
 (`docs/01`–`docs/05`) with the free-first data-source specification supplied on
 2026-11-08, record every material gap, and document how the codebase now closes it.
 
-**Status:** implemented in the backend and frontend, with migration `0002`,
-86 passing backend tests and a successful frontend production build.
+**Status:** implemented in the backend and frontend. Migrations `0001`–`0003` apply cleanly,
+the full backend suite (126 tests) passes, and the frontend production build succeeds.
 
 ---
 
@@ -216,9 +216,11 @@ run for the affected product, so the recommendation reflects the new evidence.
 
 ## 8. Verification
 
-- `backend`: `86 passed` under pytest, including new tests for connector status
-  gating, provenance, manual observations/suppliers, CSV observation import and
-  every recommendation verdict path.
+- `backend`: `126 passed` under pytest, including the free-first tests for
+  connector status gating, provenance, manual observations/suppliers, CSV
+  observation import and every recommendation verdict path, plus the Phase-1
+  completion tests for refresh-token rotation/reuse, merges, score recalculation,
+  the GST profit model and XLSX export.
 - `alembic upgrade head` and `alembic check`: no drift.
-- `frontend`: `tsc --noEmit` and `next build` succeed; `/opportunities` is a new
-  route.
+- `frontend`: `tsc --noEmit` and `next build` succeed; `/opportunities` and
+  `/profit` are new routes.

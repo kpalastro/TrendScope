@@ -7,6 +7,24 @@ implemented vs outstanding work.
 **Estimated effort:** Phase 1 ≈ **24–32 engineer-days** for one senior full-stack engineer, assuming
 the open decisions in §6 are answered before M4. Phases 2–4 are estimates, not commitments.
 
+## 0. Status (2026-11-08)
+
+Phase 1 is implemented on the `phase-1-completion` branch. This table records what the codebase
+actually covers against the milestones below; unlisted work is still planned.
+
+| Milestone | Status | Notes |
+|---|---|---|
+| M0 Foundation | Done | Compose stack, health endpoints, structured errors, request IDs |
+| M1 Schema and seed | Done | Migrations `0001`–`0003`; seeders and constraint tests |
+| M2 Catalogue API | Done | Catalogue, rotating refresh tokens, logout, RBAC, audit log |
+| M3 Import and dedup | Done | CSV import, identifier-first matching, fuzzy review queue, non-destructive merge |
+| M4 Free-first connectors | Done | See [`06-free-first-gap-analysis.md`](06-free-first-gap-analysis.md) |
+| M5 Metrics | Done | Growth guards, coverage, competition, discovery read models |
+| M6 Scoring | Done | Profiles, explainable scores, `POST /scores/recalculate` |
+| M7 Frontend | Done | Shell, dashboard, explorer, product detail, watchlist |
+| M8 Reports and export | Done | GST profit calculator with saved scenarios; CSV/JSON/XLSX reports |
+| M9 Hardening | Partial | Backend suite green (126 tests) and production build clean; PDF export, Playwright smoke, accessibility audit and the 10k-product performance check remain |
+
 ---
 
 ## 1. Sequencing principle

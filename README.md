@@ -101,6 +101,10 @@ Schedules run in **Australia/Sydney**:
 - **Ingestion** — deterministic mock provider (48 products, up to 400 days,
   keyed on `(slug, date)`, idempotent), CSV import with per-row validation and
   line-number errors, manual product entry, observations and supplier quotes.
+- **Identity and deduplication** — GTIN/UPC/EAN/ISBN/ASIN/eBay item/supplier
+  SKU/MPN/Shopify SKU identifiers and aliases on import and manual entry,
+  identifier conflicts rejected with `409`, a fuzzy review queue for near
+  matches, and non-destructive merges that move history to the survivor.
 - **Free-first connectors** — a connector plugin framework with
   `fetch_data`, `validate_data`, `normalize_data`, `get_source_status`,
   `get_last_sync` and `handle_errors`; mock, CSV, Google Trends/BigQuery, eBay AU,
@@ -120,16 +124,21 @@ Schedules run in **Australia/Sydney**:
 - **Competition evidence** — listing count, price dispersion and review
   concentration; classified `unknown` below two independent signals.
 - **Profitability** — GST-aware contribution margin from the cheapest supplier
-  offer, shown as an estimate.
+  offer, shown as an estimate, plus a **profit calculator** that tests a real
+  quote (landed cost, GST/input tax credits, duty, fees, returns, advertising) in
+  decimal arithmetic and saves scenarios to your account.
 - **Dashboard** — eight ranked widgets plus summary KPIs and source health.
 - **Product detail** — trend chart, score breakdown, competition evidence,
   listings, supplier offers, provenance and data-quality panel.
 - **Watchlist** — statuses, priority, notes, CSV export, 2–5 product comparison.
 - **Reports** — weekly snapshots with top growth, opportunities, emerging,
-  category mix, unavailable-data counts, limitations and CSV/JSON download.
-- **Auth** — Argon2id passwords, JWT bearer tokens, roles `admin`, `analyst`,
-  `viewer`.
-- **Tests** — 86 backend unit and integration tests.
+  category mix, unavailable-data counts, limitations and CSV/JSON/XLSX download
+  (formula-injection safe).
+- **Auth** — Argon2id passwords, JWT bearer tokens with silent refresh, rotating
+  single-use refresh tokens in an HttpOnly cookie, server-side logout and an
+  append-only audit log; roles `admin`, `analyst`, `viewer`.
+- **Tests** — 126 backend unit and integration tests; `npx tsc --noEmit` and
+  `next build` are clean.
 
 ## Architecture at a glance
 
@@ -182,6 +191,14 @@ Recorded here so the documents and code do not silently disagree:
 - **Watchlist compare accepts product IDs.** The contract sketch used watchlist
   entry IDs; the UI sends `product_ids` because an entry can be removed while
   the comparison stays useful.
+- **The refresh cookie is scoped to `/`, not `/api/v1/auth`.** Browsers scope
+  cookies to the URL path the browser requested. With the Next.js rewrite the
+  browser calls `/api/backend/auth/*`, so a path-scoped cookie would never be
+  sent back. The token is opaque and HttpOnly; the wider path only affects where
+  the browser attaches it.
+- **Report formats.** CSV, JSON and XLSX are implemented; PDF is deliberately
+  deferred (decision D5). Text beginning with a formula trigger is neutralised
+  in both CSV and XLSX exports.
 
 ## Data sources
 
@@ -242,12 +259,13 @@ The OpenAPI document is served at `/api/v1/openapi.json` and browsable at
 `/api/docs`. Main resources:
 
 ```text
-POST /api/v1/auth/login              GET /api/v1/auth/me
-GET  /api/v1/dashboard                GET /api/v1/dashboard/summary
-GET  /api/v1/products                 POST /api/v1/products
-GET  /api/v1/products/{slug|id}       PATCH/DELETE /api/v1/products/{id}
-GET  /api/v1/products/{id}/trends     GET /api/v1/products/{id}/score
-POST /api/v1/products/import/csv      GET /api/v1/products/import/csv/template
+POST /api/v1/auth/login              POST /api/v1/auth/refresh
+POST /api/v1/auth/logout             GET  /api/v1/auth/me
+GET  /api/v1/dashboard               GET  /api/v1/dashboard/summary
+GET  /api/v1/products                POST /api/v1/products
+GET  /api/v1/products/{slug|id}      PATCH/DELETE /api/v1/products/{id}
+GET  /api/v1/products/{id}/trends    GET  /api/v1/products/{id}/score
+POST /api/v1/products/import/csv     GET  /api/v1/products/import/csv/template
 GET  /api/v1/products/{id}/observations
 POST /api/v1/products/{id}/observations
 PATCH /api/v1/products/{id}/observations/{observation_id}
@@ -255,17 +273,23 @@ POST /api/v1/products/{id}/suppliers
 PATCH /api/v1/products/{id}/suppliers/{offer_id}
 GET  /api/v1/products/import/observations/template
 POST /api/v1/products/import/observations/csv
-GET  /api/v1/trending                 GET /api/v1/emerging
-GET  /api/v1/opportunities            GET /api/v1/opportunities/recommendations
+GET  /api/v1/products/matches        POST /api/v1/products/matches/{id}/resolve
+POST /api/v1/products/{id}/merge
+GET  /api/v1/trending                GET  /api/v1/emerging
+GET  /api/v1/opportunities           GET  /api/v1/opportunities/recommendations
 GET  /api/v1/seasonal
-GET  /api/v1/categories               POST /api/v1/categories
-GET  /api/v1/watchlist                POST /api/v1/watchlist
-POST /api/v1/watchlist/compare        GET /api/v1/watchlist/export
-GET  /api/v1/reports                  POST /api/v1/reports
-GET  /api/v1/reports/{id}/download    GET /api/v1/exports/products
-GET  /api/v1/data-sources             POST /api/v1/data-sources/{id}/sync
+GET  /api/v1/categories              POST /api/v1/categories
+GET  /api/v1/watchlist               POST /api/v1/watchlist
+POST /api/v1/watchlist/compare       GET  /api/v1/watchlist/export
+POST /api/v1/profit/calculate        GET  /api/v1/profit/assumptions
+GET  /api/v1/profit/scenarios        POST /api/v1/profit/scenarios
+PATCH/DELETE /api/v1/profit/scenarios/{id}
+GET  /api/v1/reports                 POST /api/v1/reports
+GET  /api/v1/reports/{id}/download   GET  /api/v1/exports/products
+GET  /api/v1/data-sources            POST /api/v1/data-sources/{id}/sync
 POST /api/v1/data-sources/{id}/test-connection
-GET  /api/v1/sync/status              GET /api/v1/scoring-profiles
+GET  /api/v1/sync/status             GET  /api/v1/scoring-profiles
+POST /api/v1/scores/recalculate
 ```
 
 Money is serialised as decimal strings, timestamps as ISO 8601 UTC, and errors
@@ -279,15 +303,23 @@ use a consistent envelope:
 
 ```bash
 make test
-# 86 passed
+# 126 passed
 ```
 
 The suite runs against a temporary SQLite database per test. It covers growth
 window arithmetic, missing-data reasons, scoring renormalisation and shrinkage,
-competition classification, normalisation/slugging, auth, product reads, watchlist
-behaviour, CSV import validation, dashboard/report generation, sync idempotency,
-connector status gating, observation provenance, manual supplier/observation
-entry and recommendation verdicts.
+competition classification, normalisation/slugging, auth (login, refresh rotation,
+reuse detection, logout), RBAC, product reads and merge safety, watchlist
+behaviour, CSV import validation (including identifiers), dashboard/report
+generation and XLSX/CSV export, sync idempotency, connector status gating,
+observation provenance, manual supplier/observation entry, score recalculation,
+the GST profit model and recommendation verdicts.
+
+The frontend is checked with:
+
+```bash
+cd frontend && npx tsc --noEmit && npm run build
+```
 
 Alembic schema drift check:
 
@@ -310,7 +342,7 @@ backend/
   tests/             unit and integration tests
 frontend/
   src/app/           routes: dashboard, products, opportunities, trending,
-                     categories, watchlist, reports, sources, login
+                     categories, watchlist, profit, reports, sources, login
   src/components/    shell, auth provider, tables, UI primitives
   src/lib/           API client, types, formatting, fetch hook
 docs/                architecture, ERD, API contract, source assessment, plan
