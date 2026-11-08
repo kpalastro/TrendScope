@@ -22,7 +22,7 @@ import {
 import { api } from "@/lib/api";
 import { useApi } from "@/lib/useApi";
 import type { IngestionRun, ScoringProfile, SourceStatus } from "@/lib/types";
-import { COMPONENT_LABEL, formatDateTime, relativeDays, titleCase } from "@/lib/format";
+import { COMPONENT_LABEL, formatDateTime, money, relativeDays, titleCase } from "@/lib/format";
 
 const STATUS_ICON: Record<string, typeof CheckCircle2> = {
   idle: CircleSlash,
@@ -42,6 +42,27 @@ function statusTone(status: string): "good" | "danger" | "amber" | "muted" {
   if (status === "running") return "amber";
   return "muted";
 }
+
+function healthTone(health: string): "good" | "danger" | "amber" | "muted" {
+  if (health === "healthy") return "good";
+  if (health === "degraded" || health === "unavailable") return "danger";
+  if (health === "manual" || health === "unconfigured") return "amber";
+  return "muted";
+}
+
+function costTone(costModel: string): "good" | "danger" | "amber" | "muted" {
+  if (costModel === "free") return "good";
+  if (costModel === "paid") return "danger";
+  if (costModel === "manual") return "amber";
+  return "muted";
+}
+
+const AVAILABILITY_LABEL: Record<string, string> = {
+  available: "available",
+  requires_credentials: "needs credentials",
+  manual_fallback: "manual fallback",
+  unavailable: "unavailable",
+};
 
 export default function SourcesPage() {
   const { isAdmin, canWrite } = useAuth();
@@ -88,6 +109,29 @@ export default function SourcesPage() {
     }
   }
 
+  async function testConnection(source: SourceStatus) {
+    setBusyId(source.id);
+    setNotice(null);
+    try {
+      const result = await api.post<{
+        state: string;
+        configured: boolean;
+        reason: string | null;
+        note: string;
+      }>(`/data-sources/${source.id}/test-connection`);
+      setNotice({
+        message: `${source.provider_name}: ${result.state}${
+          result.reason ? ` — ${result.reason}` : ""
+        }. ${result.note}`,
+        tone: result.configured ? "ok" : "error",
+      });
+    } catch (err) {
+      setNotice({ message: (err as Error).message, tone: "error" });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   const activeProfile = (profiles.data?.data ?? []).find((profile) => profile.is_active);
 
   return (
@@ -95,7 +139,7 @@ export default function SourcesPage() {
       <PageHeader
         eyebrow="Ingestion"
         title="Data sources"
-        description="Phase 1 runs a deterministic synthetic provider and a CSV importer. Other providers are registered but disabled — nothing scrapes or bypasses access controls."
+        description="Free-first by design: the MVP runs on mock, CSV and manual research. Connector plugins declare cost, availability and usage rights; nothing scrapes or bypasses access controls."
         actions={
           <button type="button" className="btn btn-sm" onClick={reload} disabled={loading}>
             <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} aria-hidden="true" />
@@ -130,7 +174,6 @@ export default function SourcesPage() {
           {sources.map((source) => {
             const syncStatus = normaliseStatus(source.sync_status);
             const Icon = STATUS_ICON[syncStatus] ?? CircleSlash;
-            const isMock = source.provider_key === "mock";
             return (
               <Card key={source.id} className="flex flex-col p-4">
                 <div className="flex items-start justify-between gap-3">
@@ -140,11 +183,13 @@ export default function SourcesPage() {
                       <Pill tone={source.enabled ? "good" : "muted"}>
                         {source.enabled ? "enabled" : "disabled"}
                       </Pill>
+                      <Pill tone={costTone(source.cost_model)}>{source.cost_model}</Pill>
+                      <Pill tone={healthTone(source.health)}>{source.health}</Pill>
                       {source.is_synthetic ? <Pill tone="amber">synthetic</Pill> : null}
                       {!source.configured ? <Pill tone="danger">not configured</Pill> : null}
                     </div>
                     <p className="num mt-1 text-[0.68rem] text-muted">
-                      {source.provider_key} · {source.source_type}
+                      {source.provider_key} · {source.source_type} · {source.usage_rights}
                     </p>
                   </div>
                   <span className="flex items-center gap-1.5 text-xs text-muted">
@@ -158,12 +203,27 @@ export default function SourcesPage() {
 
                 <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
                   <div>
-                    <dt className="text-muted">Last sync</dt>
-                    <dd>{relativeDays(source.last_sync_at)}</dd>
+                    <dt className="text-muted">Last success</dt>
+                    <dd>{relativeDays(source.last_success_at ?? source.last_sync_at)}</dd>
                   </div>
                   <div>
-                    <dt className="text-muted">Rate limit</dt>
-                    <dd className="num">{source.rate_limit_per_min}/min</dd>
+                    <dt className="text-muted">Availability</dt>
+                    <dd>{AVAILABILITY_LABEL[source.availability] ?? titleCase(source.availability)}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted">Monthly cost</dt>
+                    <dd className="num">
+                      {money(source.monthly_cost, source.cost_currency)}
+                      <span className="text-muted"> · estimated spend {money(source.estimated_monthly_spend, source.cost_currency)}</span>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted">Usage this month</dt>
+                    <dd className="num">
+                      {source.requests_used_month}
+                      {source.request_limit_month === null ? "" : ` / ${source.request_limit_month}`}
+                      {source.usage_period ? ` (${source.usage_period})` : ""}
+                    </dd>
                   </div>
                   <div>
                     <dt className="text-muted">Credentials</dt>
@@ -174,6 +234,38 @@ export default function SourcesPage() {
                     <dd className="num">{source.consecutive_failures}</dd>
                   </div>
                 </dl>
+
+                {source.availability_reason ? (
+                  <p className="mt-2 text-[0.7rem] leading-relaxed text-muted">
+                    {source.availability_reason}
+                  </p>
+                ) : null}
+
+                {source.connector.docs_url ? (
+                  <p className="mt-1 text-[0.7rem]">
+                    <a
+                      href={source.connector.docs_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="link"
+                    >
+                      Provider documentation
+                    </a>
+                    {source.connector.terms_url ? (
+                      <>
+                        {" · "}
+                        <a
+                          href={source.connector.terms_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="link"
+                        >
+                          Terms
+                        </a>
+                      </>
+                    ) : null}
+                  </p>
+                ) : null}
 
                 {source.last_error ? (
                   <p className="mt-2 flex items-start gap-1.5 text-[0.7rem]" style={{ color: "var(--color-danger)" }}>
@@ -192,25 +284,50 @@ export default function SourcesPage() {
                   </button>
                   <div className="flex items-center gap-1.5">
                     {isAdmin ? (
-                      <button type="button" className="btn btn-sm" onClick={() => toggle(source)}>
-                        {source.enabled ? "Disable" : "Enable"}
-                      </button>
+                      <>
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          onClick={() => testConnection(source)}
+                          disabled={busyId === source.id || !source.connector.installed}
+                          title={
+                            source.connector.installed
+                              ? "Check credentials and configuration (no provider call)"
+                              : "No connector plugin installed"
+                          }
+                        >
+                          Test
+                        </button>
+                        <button type="button" className="btn btn-sm" onClick={() => toggle(source)}>
+                          {source.enabled ? "Disable" : "Enable"}
+                        </button>
+                      </>
                     ) : null}
                     <button
                       type="button"
                       className="btn btn-sm btn-primary"
                       onClick={() => sync(source)}
-                      disabled={!canWrite || !source.enabled || !isMock || busyId === source.id}
+                      disabled={
+                        !canWrite ||
+                        !source.enabled ||
+                        !source.connector.available ||
+                        source.provider_key === "csv_import" ||
+                        busyId === source.id
+                      }
                       title={
-                        !isMock
-                          ? "Only the mock provider is enabled in Phase 1"
-                          : !source.enabled
-                            ? "Enable the source first"
-                            : "Run a mock sync"
+                        source.provider_key === "csv_import"
+                          ? "Use the CSV upload workflow"
+                          : !source.connector.installed
+                            ? "No connector plugin installed"
+                            : !source.connector.available
+                              ? source.connector.reason ?? "Source is not available"
+                              : !source.enabled
+                                ? "Enable the source first"
+                                : "Run a sync"
                       }
                     >
                       <Play className="h-3.5 w-3.5" aria-hidden="true" />
-                      {busyId === source.id ? "Syncing…" : "Run sync"}
+                      {busyId === source.id ? "Working…" : "Run sync"}
                     </button>
                   </div>
                 </div>
@@ -332,21 +449,25 @@ export default function SourcesPage() {
           </h2>
           <ul className="mt-2 space-y-2 text-xs leading-relaxed text-muted">
             <li>
-              Only the mock provider and CSV importer are active in Phase 1. They require no
-              credentials and no external requests.
+              The MVP operates on the synthetic provider, CSV imports and manual research. None of
+              those requires a marketplace subscription.
             </li>
             <li>
-              Google Trends, eBay AU, Exploding Topics, Amazon AU, TikTok and CJ Dropshipping are
-              registered with their status. Unavailable providers stay disabled rather than being
-              approximated silently.
+              Google Trends has no public API; use its CSV export or the free BigQuery public
+              dataset. TikTok and Amazon AU are manual-research fallbacks. eBay Browse shows active
+              listings only, never sold data.
             </li>
             <li>
-              No scraping, CAPTCHA bypass or anti-bot circumvention. Phase 2 providers activate only
-              with authorised credentials and terms-compliant access.
+              Paid providers such as Exploding Topics are optional plugins. Enabling one never
+              changes the scoring engine or database design.
             </li>
             <li>
-              Synthetic records carry <span className="num">is_synthetic</span> through observations,
-              products, suppliers and API payloads.
+              No scraping, CAPTCHA bypass or anti-bot circumvention. A subscription to a web app is
+              not treated as an API or redistribution licence.
+            </li>
+            <li>
+              Synthetic and manual records carry their provenance through observations, products,
+              suppliers and API payloads.
             </li>
           </ul>
         </Card>

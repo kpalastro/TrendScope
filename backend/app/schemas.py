@@ -8,6 +8,7 @@ both contract requirements. The models here document the stable shapes.
 from __future__ import annotations
 
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
@@ -235,6 +236,128 @@ class ProductPatch(BaseModel):
     status: Literal["discovered", "active", "archived"] | None = None
 
 
+METRIC_TYPE_VALUES = (
+    "actual_sales",
+    "estimated_sales",
+    "search_interest",
+    "marketplace_listing",
+    "marketplace_price",
+    "marketplace_review",
+    "social_engagement",
+    "advertising",
+    "supplier_cost",
+    "other",
+)
+
+
+class ObservationCreate(BaseModel):
+    """A hand-recorded observation, with the provenance the operator must supply.
+
+    ``value`` stays a number on its own; ``metric_type`` says what that number
+    means so search interest, listings and engagement are never summed.
+    """
+
+    metric_name: str = Field(min_length=1, max_length=60)
+    metric_type: Literal[
+        "actual_sales",
+        "estimated_sales",
+        "search_interest",
+        "marketplace_listing",
+        "marketplace_price",
+        "marketplace_review",
+        "social_engagement",
+        "advertising",
+        "supplier_cost",
+        "other",
+    ] = "search_interest"
+    value: float
+    unit: str | None = Field(default=None, max_length=20)
+    granularity: Literal["daily", "weekly", "monthly"] = "daily"
+    observation_date: date
+    period_start: date | None = None
+    period_end: date | None = None
+    country: str | None = Field(default=None, min_length=2, max_length=2)
+    currency: str | None = Field(default=None, min_length=3, max_length=3)
+    provider_name: str = Field(default="Manual research", min_length=1, max_length=160)
+    source_url: str | None = Field(default=None, max_length=600)
+    verification_status: Literal["verified", "estimated", "unverified", "synthetic"] = (
+        "unverified"
+    )
+    data_quality: Literal["high", "medium", "low", "unknown", "synthetic"] = "unknown"
+    original_metric: str | None = Field(default=None, max_length=120)
+    confidence: float = Field(default=0.6, ge=0, le=1)
+    notes: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("value")
+    @classmethod
+    def _finite_value(cls, value: float) -> float:
+        import math
+
+        if not math.isfinite(value):
+            raise ValueError("value must be a finite number")
+        return value
+
+    @field_validator("observation_date", "period_start", "period_end")
+    @classmethod
+    def _not_in_future(cls, value: date | None) -> date | None:
+        if value is not None and value > date.today():
+            raise ValueError("observation dates cannot be in the future")
+        return value
+
+
+class ObservationCorrect(BaseModel):
+    """Correction to a hand-entered observation.
+
+    Only operator-entered rows (the ``csv_import`` source) can be corrected;
+    connector history stays append-only. The previous value is retained in the
+    row's ``metadata.corrections`` log so the change remains auditable.
+    """
+
+    value: float | None = None
+    verification_status: Literal["verified", "estimated", "unverified"] | None = None
+    data_quality: Literal["high", "medium", "low", "unknown"] | None = None
+    source_url: str | None = Field(default=None, max_length=600)
+    notes: str | None = Field(default=None, max_length=2000)
+    reason: str | None = Field(default=None, max_length=500)
+
+    @field_validator("value")
+    @classmethod
+    def _finite_value(cls, value: float | None) -> float | None:
+        import math
+
+        if value is not None and not math.isfinite(value):
+            raise ValueError("value must be a finite number")
+        return value
+
+
+class SupplierOfferCreate(BaseModel):
+    supplier_name: str = Field(min_length=2, max_length=200)
+    supplier_url: str | None = Field(default=None, max_length=600)
+    country: str | None = Field(default=None, min_length=2, max_length=2)
+    supplier_rating: float | None = Field(default=None, ge=0, le=5)
+    product_cost: Decimal = Field(gt=0)
+    shipping_cost: Decimal = Field(default=Decimal("0"), ge=0)
+    currency: str = Field(default="AUD", min_length=3, max_length=3)
+    minimum_order_quantity: int = Field(default=1, ge=1)
+    lead_time_days: int | None = Field(default=None, ge=0)
+    availability: Literal["in_stock", "out_of_stock", "unknown"] = "in_stock"
+    external_product_id: str | None = Field(default=None, max_length=200)
+    platform_key: str = Field(default="manual", min_length=1, max_length=40)
+
+
+class SupplierOfferPatch(BaseModel):
+    supplier_name: str | None = Field(default=None, min_length=2, max_length=200)
+    supplier_url: str | None = Field(default=None, max_length=600)
+    country: str | None = Field(default=None, min_length=2, max_length=2)
+    supplier_rating: float | None = Field(default=None, ge=0, le=5)
+    product_cost: Decimal | None = Field(default=None, gt=0)
+    shipping_cost: Decimal | None = Field(default=None, ge=0)
+    currency: str | None = Field(default=None, min_length=3, max_length=3)
+    minimum_order_quantity: int | None = Field(default=None, ge=1)
+    lead_time_days: int | None = Field(default=None, ge=0)
+    availability: Literal["in_stock", "out_of_stock", "unknown"] | None = None
+
+
 # --- dashboard ------------------------------------------------------------
 
 
@@ -344,14 +467,45 @@ class DataSourceOut(BaseModel):
     rate_limit_per_min: int
     sync_status: str
     last_sync_at: datetime | None
+    last_success_at: datetime | None
     last_error: str | None
     consecutive_failures: int
+    cost_model: str
+    monthly_cost: str | None
+    cost_currency: str
+    estimated_monthly_spend: str | None
+    request_limit_month: int | None
+    requests_used_month: int
+    usage_period: str | None
+    availability: str
+    availability_reason: str | None
+    usage_rights: str
+    docs_url: str | None
+    terms_url: str | None
+    health: str
+    connector: dict[str, Any]
 
 
 class SourcePatch(BaseModel):
     enabled: bool | None = None
     config: dict[str, Any] | None = None
     rate_limit_per_min: int | None = Field(default=None, ge=1, le=6000)
+    cost_model: Literal["free", "paid", "manual", "synthetic"] | None = None
+    monthly_cost: Decimal | None = Field(default=None, ge=0)
+    cost_currency: str | None = Field(default=None, min_length=3, max_length=3)
+    request_limit_month: int | None = Field(default=None, ge=0)
+    usage_rights: (
+        Literal[
+            "api_terms",
+            "manual_research",
+            "synthetic",
+            "redistribution_not_granted",
+            "unspecified",
+        ]
+        | None
+    ) = None
+    docs_url: str | None = Field(default=None, max_length=600)
+    terms_url: str | None = Field(default=None, max_length=600)
 
 
 class RunOut(BaseModel):

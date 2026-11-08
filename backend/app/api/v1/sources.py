@@ -7,10 +7,12 @@ from fastapi import APIRouter
 from sqlalchemy import select
 
 from app.api.deps import AdminUser, CurrentUser, DbSession, WriteUser
+from app.connectors.framework import ConnectorError, ConnectorUnavailable
+from app.connectors.registry import get_connector
 from app.core.errors import ApiError
 from app.models import DataSource, IngestionRun
 from app.schemas import SourcePatch
-from app.services.ingestion import get_source, run_mock_sync
+from app.services.ingestion import get_source, run_connector_sync, run_mock_sync
 
 router = APIRouter(tags=["sources"])
 
@@ -22,22 +24,94 @@ def _configured(source: DataSource) -> bool:
     return all(os.environ.get(name) for name in names)
 
 
+def _money(value) -> str | None:
+    if value is None:
+        return None
+    return f"{float(value):.2f}"
+
+
+def _health(source: DataSource, connector_status: dict) -> str:
+    if not source.enabled:
+        return "disabled"
+    if connector_status.get("state") == "unavailable" or source.availability == "unavailable":
+        return "unavailable"
+    if connector_status.get("state") == "manual_fallback":
+        return "manual"
+    if connector_status.get("state") == "requires_credentials" or not connector_status.get(
+        "configured", False
+    ):
+        return "unconfigured"
+    if source.sync_status == "error" or (source.consecutive_failures or 0) > 0:
+        return "degraded"
+    if source.last_success_at is not None or source.sync_status == "ok":
+        return "healthy"
+    return "idle"
+
+
 def _source_payload(source: DataSource) -> dict:
+    connector = get_connector(source.provider_key)
+    if connector is not None:
+        status = connector.get_source_status(source)
+        connector_payload = {
+            "installed": True,
+            "state": status.state,
+            "available": status.available,
+            "configured": status.configured,
+            "reason": status.reason,
+            "credential_names": list(status.credential_names),
+            "docs_url": status.docs_url,
+            "terms_url": status.terms_url,
+            "cost_model": status.cost_model,
+        }
+        configured = status.configured
+    else:
+        connector_payload = {
+            "installed": False,
+            "state": "not_installed",
+            "available": False,
+            "configured": _configured(source),
+            "reason": "No connector plugin is installed. Add one later without changing the schema or scoring engine.",
+            "credential_names": [
+                name.strip()
+                for name in (source.secret_ref or "").split(",")
+                if name.strip()
+            ],
+            "docs_url": source.docs_url,
+            "terms_url": source.terms_url,
+            "cost_model": source.cost_model,
+        }
+        configured = _configured(source)
+
     return {
         "id": source.id,
         "provider_key": source.provider_key,
         "provider_name": source.provider_name,
         "source_type": source.source_type,
         "enabled": source.enabled,
-        "configured": _configured(source),
+        "configured": configured,
         "is_synthetic": source.is_synthetic,
         "config": source.config or {},
         "secret_ref": [name.strip() for name in (source.secret_ref or "").split(",") if name.strip()],
         "rate_limit_per_min": source.rate_limit_per_min,
         "sync_status": source.sync_status,
         "last_sync_at": source.last_sync_at,
+        "last_success_at": source.last_success_at,
         "last_error": source.last_error,
         "consecutive_failures": source.consecutive_failures,
+        "cost_model": source.cost_model,
+        "monthly_cost": _money(source.monthly_cost),
+        "cost_currency": source.cost_currency,
+        "estimated_monthly_spend": _money(source.monthly_cost),
+        "request_limit_month": source.request_limit_month,
+        "requests_used_month": source.requests_used_month or 0,
+        "usage_period": source.usage_period,
+        "availability": source.availability,
+        "availability_reason": source.availability_reason,
+        "usage_rights": source.usage_rights,
+        "docs_url": source.docs_url,
+        "terms_url": source.terms_url,
+        "health": _health(source, connector_payload),
+        "connector": connector_payload,
     }
 
 
@@ -99,8 +173,49 @@ def patch_source(
         source.config = payload.config
     if payload.rate_limit_per_min is not None:
         source.rate_limit_per_min = payload.rate_limit_per_min
+    if payload.cost_model is not None:
+        source.cost_model = payload.cost_model
+    if payload.monthly_cost is not None:
+        source.monthly_cost = payload.monthly_cost
+    if payload.cost_currency is not None:
+        source.cost_currency = payload.cost_currency.upper()
+    if payload.request_limit_month is not None:
+        source.request_limit_month = payload.request_limit_month
+    if payload.usage_rights is not None:
+        source.usage_rights = payload.usage_rights
+    if payload.docs_url is not None:
+        source.docs_url = payload.docs_url
+    if payload.terms_url is not None:
+        source.terms_url = payload.terms_url
     db.commit()
     return _source_payload(source)
+
+
+@router.post("/data-sources/{source_id}/test-connection")
+def test_connection(source_id: UUID, user: AdminUser, db: DbSession) -> dict:
+    source = db.get(DataSource, source_id)
+    if source is None:
+        raise ApiError(404, "NOT_FOUND", "Data source not found.")
+    connector = get_connector(source.provider_key)
+    if connector is None:
+        raise ApiError(
+            501,
+            "NOT_IMPLEMENTED",
+            "No connector plugin is installed for this provider.",
+        )
+    status = connector.get_source_status(source)
+    return {
+        "source_id": source.id,
+        "provider_key": source.provider_key,
+        "installed": True,
+        "enabled": status.enabled,
+        "configured": status.configured,
+        "available": status.available,
+        "state": status.state,
+        "reason": status.reason,
+        "checked_at": None,
+        "note": "Credential and configuration check only; no provider call was made.",
+    }
 
 
 @router.post("/data-sources/{source_id}/sync", status_code=202)
@@ -110,12 +225,30 @@ def sync_source(source_id: UUID, user: WriteUser, db: DbSession) -> dict:
         raise ApiError(404, "NOT_FOUND", "Data source not found.")
     if not source.enabled:
         raise ApiError(503, "SOURCE_UNAVAILABLE", "This source is disabled.")
-    if source.provider_key != "mock":
+
+    connector = get_connector(source.provider_key)
+    if connector is None:
         raise ApiError(
             501,
             "NOT_IMPLEMENTED",
-            "Only the mock provider is enabled in Phase 1. Configure it in a later phase.",
+            "No connector plugin is installed for this provider. Add a connector plugin "
+            "or use CSV/manual research.",
         )
+    status = connector.get_source_status(source)
+    if not status.available:
+        raise ApiError(
+            503,
+            "SOURCE_UNAVAILABLE",
+            status.reason or "This source is not available.",
+        )
+    if source.provider_key == "csv_import":
+        raise ApiError(
+            422,
+            "VALIDATION_ERROR",
+            "CSV import is an upload workflow. Use POST /products/import/csv or "
+            "POST /products/import/observations/csv.",
+        )
+
     running = db.execute(
         select(IngestionRun)
         .where(IngestionRun.source_id == source.id, IngestionRun.status == "running")
@@ -125,7 +258,16 @@ def sync_source(source_id: UUID, user: WriteUser, db: DbSession) -> dict:
         raise ApiError(409, "CONFLICT", "A run for this source is already in progress.")
 
     try:
-        run = run_mock_sync(db, source=source)
+        if source.provider_key == "mock":
+            run = run_mock_sync(db, source=source)
+        else:
+            run = run_connector_sync(db, source)
+    except ConnectorUnavailable as exc:
+        db.rollback()
+        raise ApiError(503, "SOURCE_UNAVAILABLE", str(exc)) from exc
+    except ConnectorError as exc:
+        db.rollback()
+        raise ApiError(502, "PROVIDER_ERROR", str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - provider failure surfaces in the job
         db.rollback()
         raise ApiError(502, "PROVIDER_ERROR", f"Sync failed: {type(exc).__name__}") from exc

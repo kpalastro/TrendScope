@@ -312,6 +312,17 @@ Only created when `ENABLE_PGVECTOR=true`; guarded by a migration that requires t
 | `secret_ref` | text | env var *names*, e.g. `"DATAFORSEO_LOGIN,DATAFORSEO_PASSWORD"` |
 | `is_synthetic` | boolean | NOT NULL default false |
 | `rate_limit_per_min` | integer | default per provider |
+| `cost_model` | text | `free | paid | manual | synthetic` |
+| `monthly_cost` | numeric(12,2) | declared subscription cost, default 0 |
+| `cost_currency` | char(3) | default `AUD` |
+| `request_limit_month` | integer | NULL = no declared cap |
+| `requests_used_month` | integer | NOT NULL default 0 |
+| `usage_period` | text | `YYYY-MM` the usage count belongs to |
+| `availability` | text | `available | requires_credentials | manual_fallback | unavailable` |
+| `availability_reason` | text | operator-readable explanation |
+| `usage_rights` | text | what the connector may do with the data |
+| `docs_url` / `terms_url` | text | provider references |
+| `last_success_at` | timestamptz | last successful collection |
 | `last_sync_at` | timestamptz | |
 | `sync_status` | sync_status | `never_run | ok | partial | error | disabled | degraded` |
 | `last_error` | text | redacted, truncated |
@@ -354,13 +365,21 @@ Indexes: `(source_id, started_at DESC)`, `(status)` partial where status IN ('ru
 | `observation_date` | date | NOT NULL — the day the metric describes |
 | `granularity` | granularity | `daily | weekly | monthly`, default `daily` |
 | `metric_name` | metric_name | NOT NULL (see below) |
+| `metric_type` | text | `search_interest | marketplace_price | marketplace_competition | social_engagement | advertising | actual_sales | estimated_sales | supplier_cost | other` — never merged across types |
 | `metric_value` | numeric(20,6) | NOT NULL |
 | `unit` | text | `index_0_100 | count | aud | rank | score | pct` |
 | `country` | char(2) | NOT NULL |
 | `currency` | char(3) | NULL for non-monetary metrics |
+| `provider_name` | text | named provider or manual method |
+| `period_start` / `period_end` | date | period the measurement covers |
+| `source_url` | text | where the operator/provider obtained it |
+| `verification_status` | text | `verified | estimated | unverified | synthetic` |
+| `data_quality` | text | `high | medium | low | unknown | synthetic` |
+| `original_metric` | text | the provider's own metric name |
 | `confidence` | numeric(4,3) | 0–1, NOT NULL default 1.0 |
 | `is_synthetic` | boolean | NOT NULL default false — denormalised for filtering |
 | `source_timestamp` | timestamptz | when the provider says it was measured |
+| `collected_at` | timestamptz | when the observation entered TrendScope |
 | `ingested_at` | timestamptz | NOT NULL default now() |
 | `metadata` | jsonb | NOT NULL default `'{}'` — related query, region, listing id, etc. |
 

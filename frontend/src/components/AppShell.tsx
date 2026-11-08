@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
   Bookmark,
+  ClipboardCheck,
   Database,
   FileText,
   LayoutDashboard,
@@ -22,6 +23,7 @@ import { useAuth } from "./AuthProvider";
 const NAV = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/products", label: "Products", icon: PackageSearch },
+  { href: "/opportunities", label: "Opportunities", icon: ClipboardCheck },
   { href: "/trending", label: "Trending", icon: TrendingUp },
   { href: "/categories", label: "Categories", icon: Radar },
   { href: "/watchlist", label: "Watchlist", icon: Bookmark },
@@ -125,9 +127,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         {nav}
         <div className="mt-auto space-y-3">
           <div className="rounded-md border border-line bg-bg p-3">
-            <p className="eyebrow">Phase 1</p>
+            <p className="eyebrow">Free-first</p>
             <p className="mt-1 text-xs leading-relaxed text-muted">
-              Mock and CSV sources. Every synthetic record is labelled.
+              Runs without marketplace subscriptions. Every synthetic or manual record is labelled.
             </p>
           </div>
           <div className="flex items-center justify-between gap-2">

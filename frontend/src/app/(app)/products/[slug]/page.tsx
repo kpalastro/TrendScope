@@ -7,11 +7,14 @@ import {
   ArrowLeft,
   BookmarkPlus,
   CheckCircle2,
+  ClipboardCheck,
   Database,
   Info,
   LineChart as LineChartIcon,
+  Plus,
   Sparkles,
   TriangleAlert,
+  XCircle,
 } from "lucide-react";
 import {
   Area,
@@ -35,7 +38,7 @@ import {
 } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { useApi } from "@/lib/useApi";
-import type { ProductDetail } from "@/lib/types";
+import type { ProductDetail, Recommendation } from "@/lib/types";
 import {
   CLASSIFICATION_LABEL,
   COMPETITION_LABEL,
@@ -95,13 +98,17 @@ function ScoreDial({ value, classification }: { value: number | null; classifica
   );
 }
 
+function seriesKey(item: ProductDetail["trend_series"][number]): string {
+  return `${item.metric_name}|${item.metric_type}`;
+}
+
 function TrendChart({ detail }: { detail: ProductDetail }) {
   const [mounted, setMounted] = useState(false);
   const series = detail.trend_series;
-  const [metric, setMetric] = useState(series[0]?.metric_name ?? "search_interest");
+  const [metric, setMetric] = useState(series[0] ? seriesKey(series[0]) : "search_interest|search_interest");
   useEffect(() => setMounted(true), []);
 
-  const active = series.find((item) => item.metric_name === metric) ?? series[0];
+  const active = series.find((item) => seriesKey(item) === metric) ?? series[0];
   const points = useMemo(
     () => (active?.points ?? []).filter((point) => point.value !== null),
     [active],
@@ -141,8 +148,8 @@ function TrendChart({ detail }: { detail: ProductDetail }) {
               aria-label="Trend metric"
             >
               {series.map((item) => (
-                <option key={item.metric_name} value={item.metric_name}>
-                  {titleCase(item.metric_name)}
+                <option key={seriesKey(item)} value={seriesKey(item)}>
+                  {titleCase(item.metric_name)} · {titleCase(item.metric_type)}
                 </option>
               ))}
             </select>
@@ -370,6 +377,403 @@ function DataQualityPanel({ detail }: { detail: ProductDetail }) {
       <p className="mt-3 border-t border-line pt-3 text-[0.7rem] leading-relaxed text-muted">
         {detail.disclaimer}
       </p>
+    </Card>
+  );
+}
+
+function verdictTone(verdict: string): "good" | "amber" | "danger" {
+  if (verdict === "recommended") return "good";
+  if (verdict === "not_recommended") return "danger";
+  return "amber";
+}
+
+function RecommendationPanel({ recommendation }: { recommendation: Recommendation }) {
+  return (
+    <Card className="p-5">
+      <div className="flex items-start justify-between gap-2">
+        <h2 className="flex items-center gap-2 text-sm font-semibold tracking-tight">
+          <ClipboardCheck className="h-4 w-4 text-accent" aria-hidden="true" /> Recommendation
+        </h2>
+        <Pill tone={verdictTone(recommendation.verdict)}>{recommendation.label}</Pill>
+      </div>
+      <p className="mt-2 text-xs leading-relaxed text-muted">{recommendation.summary}</p>
+
+      <ul className="mt-3 divide-y divide-line">
+        {recommendation.checks.map((check) => (
+          <li key={check.key} className="flex items-start justify-between gap-3 py-2 text-xs">
+            <span className="min-w-0">
+              <span className="font-medium">{check.label}</span>
+              <span className="mt-0.5 block text-[0.7rem] leading-relaxed text-muted">
+                {check.detail}
+              </span>
+            </span>
+            <span className="shrink-0 pt-0.5">
+              {check.status === "pass" ? (
+                <CheckCircle2 className="h-4 w-4 text-good" aria-label="pass" />
+              ) : check.status === "fail" ? (
+                <XCircle className="h-4 w-4 text-danger" aria-label="fail" />
+              ) : (
+                <Pill tone="amber">missing</Pill>
+              )}
+            </span>
+          </li>
+        ))}
+      </ul>
+
+      <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 border-t border-line pt-3 text-xs">
+        <div>
+          <dt className="text-muted">Supplier cost</dt>
+          <dd className="num">{money(recommendation.economics.product_cost)}</dd>
+        </div>
+        <div>
+          <dt className="text-muted">Delivery</dt>
+          <dd className="num">{money(recommendation.economics.delivery_cost)}</dd>
+        </div>
+        <div>
+          <dt className="text-muted">Est. profit / unit</dt>
+          <dd className="num">{money(recommendation.economics.estimated_profit_per_unit)}</dd>
+        </div>
+        <div>
+          <dt className="text-muted">Est. margin</dt>
+          <dd className="num">
+            {recommendation.economics.estimated_margin_pct === null
+              ? "—"
+              : `${recommendation.economics.estimated_margin_pct.toFixed(1)}%`}
+          </dd>
+        </div>
+      </dl>
+
+      {recommendation.next_actions.length ? (
+        <div className="mt-3 border-t border-line pt-3">
+          <p className="eyebrow">Before recommending</p>
+          <ul className="mt-1 space-y-1 text-[0.7rem] leading-relaxed text-muted">
+            {recommendation.next_actions.map((action) => (
+              <li key={action.key}>• {action.action}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      <p className="mt-3 border-t border-line pt-3 text-[0.65rem] leading-relaxed text-muted">
+        {recommendation.disclaimer}
+      </p>
+    </Card>
+  );
+}
+
+const METRIC_TYPES = [
+  "search_interest",
+  "marketplace_listing",
+  "marketplace_price",
+  "marketplace_review",
+  "social_engagement",
+  "advertising",
+  "actual_sales",
+  "estimated_sales",
+  "supplier_cost",
+  "other",
+];
+
+function ManualEvidence({ slug, onSaved }: { slug: string; onSaved: () => void }) {
+  const [tab, setTab] = useState<"observation" | "supplier">("supplier");
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<{ message: string; tone: "ok" | "error" } | null>(null);
+  const [observation, setObservation] = useState({
+    metric_name: "search_interest",
+    metric_type: "search_interest",
+    value: "",
+    observation_date: new Date().toISOString().slice(0, 10),
+    provider_name: "Manual research",
+    source_url: "",
+    verification_status: "unverified",
+    data_quality: "unknown",
+    notes: "",
+  });
+  const [quote, setQuote] = useState({
+    supplier_name: "",
+    country: "CN",
+    product_cost: "",
+    shipping_cost: "",
+    currency: "AUD",
+    minimum_order_quantity: "1",
+    lead_time_days: "",
+  });
+
+  async function submitObservation(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setNotice(null);
+    try {
+      await api.post(`/products/${slug}/observations`, {
+        ...observation,
+        value: Number(observation.value),
+        granularity: "daily",
+        source_url: observation.source_url || null,
+        notes: observation.notes || null,
+      });
+      setNotice({ message: "Observation recorded with provenance.", tone: "ok" });
+      setObservation((current) => ({ ...current, value: "", notes: "", source_url: "" }));
+      onSaved();
+    } catch (err) {
+      setNotice({ message: (err as Error).message, tone: "error" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitQuote(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setNotice(null);
+    try {
+      await api.post(`/products/${slug}/suppliers`, {
+        supplier_name: quote.supplier_name,
+        country: quote.country || null,
+        product_cost: quote.product_cost,
+        shipping_cost: quote.shipping_cost || "0",
+        currency: quote.currency,
+        minimum_order_quantity: Number(quote.minimum_order_quantity) || 1,
+        lead_time_days: quote.lead_time_days ? Number(quote.lead_time_days) : null,
+      });
+      setNotice({ message: "Supplier quote recorded; recommendation recalculated.", tone: "ok" });
+      setQuote((current) => ({ ...current, supplier_name: "", product_cost: "", shipping_cost: "" }));
+      onSaved();
+    } catch (err) {
+      setNotice({ message: (err as Error).message, tone: "error" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card className="p-5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="flex items-center gap-2 text-sm font-semibold tracking-tight">
+          <Plus className="h-4 w-4" aria-hidden="true" /> Record evidence
+        </h2>
+        <div className="flex gap-1.5">
+          <button
+            type="button"
+            className={`btn btn-sm ${tab === "supplier" ? "btn-primary" : ""}`}
+            onClick={() => setTab("supplier")}
+          >
+            Supplier quote
+          </button>
+          <button
+            type="button"
+            className={`btn btn-sm ${tab === "observation" ? "btn-primary" : ""}`}
+            onClick={() => setTab("observation")}
+          >
+            Observation
+          </button>
+        </div>
+      </div>
+      <p className="mt-1 text-[0.7rem] leading-relaxed text-muted">
+        Manual evidence is allowed; invented evidence is not. Supplier prices and delivery costs are
+        required before a recommendation can pass.
+      </p>
+
+      {notice ? (
+        <p
+          role="status"
+          className="mt-2 text-xs"
+          style={{ color: notice.tone === "error" ? "var(--color-danger)" : "var(--color-good)" }}
+        >
+          {notice.message}
+        </p>
+      ) : null}
+
+      {tab === "supplier" ? (
+        <form className="mt-3 grid gap-2 sm:grid-cols-2" onSubmit={submitQuote}>
+          <label className="text-xs sm:col-span-2">
+            <span className="eyebrow block">Supplier name</span>
+            <input
+              className="field mt-1 w-full"
+              required
+              minLength={2}
+              value={quote.supplier_name}
+              onChange={(event) => setQuote({ ...quote, supplier_name: event.target.value })}
+            />
+          </label>
+          <label className="text-xs">
+            <span className="eyebrow block">Unit cost</span>
+            <input
+              className="field mt-1 w-full"
+              required
+              inputMode="decimal"
+              value={quote.product_cost}
+              onChange={(event) => setQuote({ ...quote, product_cost: event.target.value })}
+            />
+          </label>
+          <label className="text-xs">
+            <span className="eyebrow block">Delivery / unit</span>
+            <input
+              className="field mt-1 w-full"
+              inputMode="decimal"
+              value={quote.shipping_cost}
+              onChange={(event) => setQuote({ ...quote, shipping_cost: event.target.value })}
+            />
+          </label>
+          <label className="text-xs">
+            <span className="eyebrow block">Supplier country</span>
+            <input
+              className="field mt-1 w-full"
+              maxLength={2}
+              value={quote.country}
+              onChange={(event) => setQuote({ ...quote, country: event.target.value.toUpperCase() })}
+            />
+          </label>
+          <label className="text-xs">
+            <span className="eyebrow block">Currency</span>
+            <input
+              className="field mt-1 w-full"
+              maxLength={3}
+              value={quote.currency}
+              onChange={(event) => setQuote({ ...quote, currency: event.target.value.toUpperCase() })}
+            />
+          </label>
+          <label className="text-xs">
+            <span className="eyebrow block">MOQ</span>
+            <input
+              className="field mt-1 w-full"
+              inputMode="numeric"
+              value={quote.minimum_order_quantity}
+              onChange={(event) =>
+                setQuote({ ...quote, minimum_order_quantity: event.target.value })
+              }
+            />
+          </label>
+          <label className="text-xs">
+            <span className="eyebrow block">Lead time (days)</span>
+            <input
+              className="field mt-1 w-full"
+              inputMode="numeric"
+              value={quote.lead_time_days}
+              onChange={(event) => setQuote({ ...quote, lead_time_days: event.target.value })}
+            />
+          </label>
+          <div className="sm:col-span-2">
+            <button type="submit" className="btn btn-sm btn-primary" disabled={busy}>
+              {busy ? "Saving…" : "Save supplier quote"}
+            </button>
+          </div>
+        </form>
+      ) : (
+        <form className="mt-3 grid gap-2 sm:grid-cols-2" onSubmit={submitObservation}>
+          <label className="text-xs">
+            <span className="eyebrow block">Metric name</span>
+            <input
+              className="field mt-1 w-full"
+              required
+              value={observation.metric_name}
+              onChange={(event) =>
+                setObservation({ ...observation, metric_name: event.target.value })
+              }
+            />
+          </label>
+          <label className="text-xs">
+            <span className="eyebrow block">Metric type</span>
+            <select
+              className="field mt-1 w-full"
+              value={observation.metric_type}
+              onChange={(event) =>
+                setObservation({ ...observation, metric_type: event.target.value })
+              }
+            >
+              {METRIC_TYPES.map((value) => (
+                <option key={value} value={value}>
+                  {titleCase(value)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="text-xs">
+            <span className="eyebrow block">Value</span>
+            <input
+              className="field mt-1 w-full"
+              required
+              inputMode="decimal"
+              value={observation.value}
+              onChange={(event) => setObservation({ ...observation, value: event.target.value })}
+            />
+          </label>
+          <label className="text-xs">
+            <span className="eyebrow block">Observation date</span>
+            <input
+              type="date"
+              className="field mt-1 w-full"
+              required
+              max={new Date().toISOString().slice(0, 10)}
+              value={observation.observation_date}
+              onChange={(event) =>
+                setObservation({ ...observation, observation_date: event.target.value })
+              }
+            />
+          </label>
+          <label className="text-xs">
+            <span className="eyebrow block">Provider / method</span>
+            <input
+              className="field mt-1 w-full"
+              value={observation.provider_name}
+              onChange={(event) =>
+                setObservation({ ...observation, provider_name: event.target.value })
+              }
+            />
+          </label>
+          <label className="text-xs">
+            <span className="eyebrow block">Source URL</span>
+            <input
+              className="field mt-1 w-full"
+              value={observation.source_url}
+              onChange={(event) =>
+                setObservation({ ...observation, source_url: event.target.value })
+              }
+            />
+          </label>
+          <label className="text-xs">
+            <span className="eyebrow block">Verification</span>
+            <select
+              className="field mt-1 w-full"
+              value={observation.verification_status}
+              onChange={(event) =>
+                setObservation({ ...observation, verification_status: event.target.value })
+              }
+            >
+              <option value="unverified">Unverified</option>
+              <option value="estimated">Estimated</option>
+              <option value="verified">Verified</option>
+            </select>
+          </label>
+          <label className="text-xs">
+            <span className="eyebrow block">Data quality</span>
+            <select
+              className="field mt-1 w-full"
+              value={observation.data_quality}
+              onChange={(event) =>
+                setObservation({ ...observation, data_quality: event.target.value })
+              }
+            >
+              <option value="unknown">Unknown</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+            </select>
+          </label>
+          <label className="text-xs sm:col-span-2">
+            <span className="eyebrow block">Notes</span>
+            <input
+              className="field mt-1 w-full"
+              value={observation.notes}
+              onChange={(event) => setObservation({ ...observation, notes: event.target.value })}
+            />
+          </label>
+          <div className="sm:col-span-2">
+            <button type="submit" className="btn btn-sm btn-primary" disabled={busy}>
+              {busy ? "Saving…" : "Save observation"}
+            </button>
+          </div>
+        </form>
+      )}
     </Card>
   );
 }
@@ -647,8 +1051,10 @@ export default function ProductDetailPage() {
         </div>
 
         <div className="space-y-4">
+          <RecommendationPanel recommendation={data.recommendation} />
           <Breakdown detail={data} />
           <DataQualityPanel detail={data} />
+          {canWrite ? <ManualEvidence slug={data.slug} onSaved={reload} /> : null}
 
           <Card className="p-5">
             <h2 className="text-sm font-semibold tracking-tight">Competition evidence</h2>
@@ -715,14 +1121,33 @@ export default function ProductDetailPage() {
             <ul className="mt-2 space-y-2">
               {data.sources.length ? (
                 data.sources.map((source) => (
-                  <li key={source.provider_key} className="flex items-start justify-between gap-2 text-xs">
-                    <span>
-                      <span className="font-medium">{source.provider_name}</span>
-                      <span className="block text-muted">
-                        latest {formatDate(source.collection_date)}
+                  <li key={source.provider_key} className="text-xs">
+                    <span className="flex items-start justify-between gap-2">
+                      <span>
+                        <span className="font-medium">{source.provider_name}</span>
+                        <span className="block text-muted">
+                          latest {formatDate(source.collection_date)} · {source.cost_model} ·{" "}
+                          {source.verification_statuses.join(", ") || "unverified"}
+                        </span>
+                        <span className="block text-[0.65rem] text-muted">
+                          {source.metric_types.join(", ")}
+                          {source.source_url ? (
+                            <>
+                              {" · "}
+                              <a
+                                href={source.source_url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="link"
+                              >
+                                source
+                              </a>
+                            </>
+                          ) : null}
+                        </span>
                       </span>
+                      {source.is_synthetic ? <Pill tone="amber">synthetic</Pill> : <Pill tone="good">observed</Pill>}
                     </span>
-                    {source.is_synthetic ? <Pill tone="amber">synthetic</Pill> : <Pill tone="good">observed</Pill>}
                   </li>
                 ))
               ) : (

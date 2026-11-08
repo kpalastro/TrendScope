@@ -9,8 +9,9 @@ from sqlalchemy import select
 from app.api.deps import CurrentUser, DbSession
 from app.core.errors import ApiError
 from app.models import OpportunityScore, Product, ProductMetric, TrendObservation
-from app.services.catalog import list_payload, query_products, top_rows
+from app.services.catalog import list_payload, query_products, summary_payload, top_rows
 from app.services.growth import seasonality_index
+from app.services.recommendations import build_recommendation, offers_by_product
 
 router = APIRouter(tags=["discovery"])
 
@@ -120,6 +121,66 @@ def opportunities(
         "presented as opportunities.",
         min_coverage=min_coverage,
     )
+
+
+@router.get("/opportunities/recommendations")
+def opportunity_recommendations(
+    user: CurrentUser,
+    db: DbSession,
+    verdict: Literal["all", "recommended", "investigate", "not_recommended"] = "all",
+    min_coverage: float = 60.0,
+    limit: int = 20,
+    synthetic: Literal["include", "exclude", "only"] = "include",
+) -> dict:
+    """Ranked opportunities with the supplier/margin investigation attached.
+
+    The opportunity score only measures demand and marketplace evidence. A
+    product is never labelled ``recommended`` until supplier price, delivery
+    cost and contribution margin have been recorded; anything unverified stays
+    ``investigate`` with the missing evidence named.
+    """
+    conditions = [
+        OpportunityScore.score.is_not(None),
+        OpportunityScore.coverage_pct >= min_coverage,
+    ]
+    extra = _synthetic_condition(synthetic)
+    if extra is not None:
+        conditions.append(extra)
+    rows = top_rows(db, "-opportunity_score", limit=max(1, min(limit * 3, 150)), conditions=conditions)
+    offers = offers_by_product(db, [row.product.id for row in rows])
+
+    data = []
+    counts = {"recommended": 0, "investigate": 0, "not_recommended": 0}
+    for row in rows:
+        offer, supplier = offers.get(row.product.id, (None, None))
+        recommendation = build_recommendation(
+            row.product, row.metric, row.score, offer, supplier
+        )
+        counts[recommendation["verdict"]] += 1
+        if verdict != "all" and recommendation["verdict"] != verdict:
+            continue
+        data.append(
+            {
+                "product": summary_payload(db, row),
+                "recommendation": recommendation,
+            }
+        )
+        if len(data) >= limit:
+            break
+
+    return {
+        "data": data,
+        "meta": {
+            "generated_at": datetime.now(timezone.utc),
+            "note": (
+                "Opportunity score is not a recommendation. Supplier cost, delivery cost "
+                "and margin must be investigated before a product is added to the catalogue."
+            ),
+            "min_coverage": min_coverage,
+            "verdict": verdict,
+            "counts": counts,
+        },
+    }
 
 
 def _seasonal_rows(db, horizon_days: int, limit: int, synthetic: str):

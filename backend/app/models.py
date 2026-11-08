@@ -59,6 +59,38 @@ GROWTH_REASONS = (
     "no_source",
 )
 
+# Free-first source metadata. Cost visibility is a first-class field rather than
+# something inferred from a provider name: a free connector must stay free, and
+# a paid plugin must declare what it costs before it is enabled.
+COST_MODELS = ("free", "paid", "manual", "synthetic")
+AVAILABILITY_STATES = (
+    "available",
+    "requires_credentials",
+    "manual_fallback",
+    "unavailable",
+)
+USAGE_RIGHTS = (
+    "api_terms",
+    "manual_research",
+    "synthetic",
+    "redistribution_not_granted",
+    "unspecified",
+)
+METRIC_TYPES = (
+    "actual_sales",
+    "estimated_sales",
+    "search_interest",
+    "marketplace_listing",
+    "marketplace_price",
+    "marketplace_review",
+    "social_engagement",
+    "advertising",
+    "supplier_cost",
+    "other",
+)
+VERIFICATION_STATUSES = ("verified", "estimated", "unverified", "synthetic")
+DATA_QUALITY_LEVELS = ("high", "medium", "low", "unknown", "synthetic")
+
 
 class User(Base):
     __tablename__ = "users"
@@ -102,6 +134,20 @@ class DataSource(Base):
     secret_ref: Mapped[str | None] = mapped_column(String(400))
     is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     rate_limit_per_min: Mapped[int] = mapped_column(Integer, default=60)
+    cost_model: Mapped[str] = mapped_column(String(20), default="free", nullable=False)
+    monthly_cost: Mapped[float] = mapped_column(Numeric(12, 2), default=0, nullable=False)
+    cost_currency: Mapped[str] = mapped_column(String(3), default="AUD", nullable=False)
+    request_limit_month: Mapped[int | None] = mapped_column(Integer)
+    requests_used_month: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    usage_period: Mapped[str | None] = mapped_column(String(7))
+    availability: Mapped[str] = mapped_column(String(30), default="available", nullable=False)
+    availability_reason: Mapped[str | None] = mapped_column(Text)
+    usage_rights: Mapped[str] = mapped_column(
+        String(40), default="unspecified", nullable=False
+    )
+    docs_url: Mapped[str | None] = mapped_column(String(600))
+    terms_url: Mapped[str | None] = mapped_column(String(600))
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     sync_status: Mapped[str] = mapped_column(String(20), default="never_run")
     last_error: Mapped[str | None] = mapped_column(Text)
@@ -209,13 +255,28 @@ class TrendObservation(Base):
     observation_date: Mapped[date] = mapped_column(Date, nullable=False)
     granularity: Mapped[str] = mapped_column(String(12), default="daily", nullable=False)
     metric_name: Mapped[str] = mapped_column(String(60), nullable=False)
+    metric_type: Mapped[str] = mapped_column(
+        String(30), default="search_interest", nullable=False
+    )
     metric_value: Mapped[float] = mapped_column(Numeric(20, 6), nullable=False)
     unit: Mapped[str | None] = mapped_column(String(20))
     country: Mapped[str] = mapped_column(String(2), default="AU", nullable=False)
     currency: Mapped[str | None] = mapped_column(String(3))
+    provider_name: Mapped[str | None] = mapped_column(String(160))
+    period_start: Mapped[date | None] = mapped_column(Date)
+    period_end: Mapped[date | None] = mapped_column(Date)
+    source_url: Mapped[str | None] = mapped_column(String(600))
+    verification_status: Mapped[str] = mapped_column(
+        String(20), default="unverified", nullable=False
+    )
+    data_quality: Mapped[str] = mapped_column(
+        String(20), default="unknown", nullable=False
+    )
+    original_metric: Mapped[str | None] = mapped_column(String(120))
     confidence: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
     is_synthetic: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     source_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     meta: Mapped[dict] = mapped_column("metadata", JSON, default=dict, nullable=False)
 

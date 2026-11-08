@@ -181,26 +181,45 @@ import repositories or models. Domain logic never lives in a router or a Celery 
 This is the most important abstraction in the system: PRD §4.3 requires modular, independently
 replaceable providers that degrade gracefully.
 
-### 6.1 Protocol
+### 6.1 Protocol (implemented)
+
+The original sketch used async iterators; Phase 1 uses a synchronous, lifecycle-based interface so a
+connector can be exercised — and its status derived — without a running event loop or network call.
+See `backend/app/connectors/framework.py`.
 
 ```python
-class Connector(Protocol):
+class BaseConnector:
     provider_key: ClassVar[str]
-    source_type: ClassVar[SourceType]
+    provider_name: ClassVar[str]
+    source_type: ClassVar[str]
+    cost_model: ClassVar[str]                  # free | paid | manual | synthetic
+    default_availability: ClassVar[str]        # available | requires_credentials | manual_fallback | unavailable
+    credential_names: ClassVar[tuple[str, ...]]
+    docs_url: ClassVar[str | None]
+    terms_url: ClassVar[str | None]
+    usage_rights: ClassVar[str]
 
-    async def health_check(self, ctx) -> HealthResult: ...
-    async def discover(self, ctx, query: DiscoveryQuery) -> AsyncIterator[ProductCandidate]: ...
-    async def fetch(self, ctx, targets: Sequence[Target], window: DateRange)
-        -> AsyncIterator[ObservationBatch]: ...
+    def fetch_data(self, ctx) -> RawPayload: ...
+    def validate_data(self, payload) -> ValidationResult: ...
+    def normalize_data(self, payload) -> ConnectorDataset: ...
+    def run(self, ctx) -> ConnectorDataset:            # fetch → validate → normalize
+        ...
+    def get_source_status(self, source) -> ConnectorStatus:
+        """Pure: derives availability from plugin presence, credentials and source config."""
+    def get_last_sync(self, source) -> datetime | None: ...
+    def handle_errors(self, exc) -> ConnectorErrorInfo:  # secret-free, operator-readable
+        ...
 ```
 
-- `ctx` carries credentials, timeouts, a `RateLimiter` and a `RequestRecorder`. Connectors never read
-  settings or the DB.
-- `ProductCandidate` = external id, title, category hint, identifiers (GTIN/ASIN/SKU), price, brand,
-  image URL, payload.
-- `ObservationBatch` = `(external_id, metric_name, value, unit, observation_date, granularity,
-  confidence, source_timestamp, payload)` tuples plus batch-level metadata.
+- `ctx` carries resolved credentials, configured targets, timeouts and a request recorder. Connectors
+  never read settings or the DB directly.
+- `ConnectorDataset` holds observations as dicts with `external_id`, `metric_name`, `metric_type`,
+  `value`, `unit`, `observation_date`, `granularity`, `confidence`, provenance fields
+  (`provider_name`, `period_start/end`, `country`, `original_metric`, `verification_status`,
+  `data_quality`, `source_url`) and provider payload.
 - Connectors return **observations, never scores**. Scoring is provider-agnostic.
+- `get_source_status` never calls the provider: it reports `available`, `requires_credentials`,
+  `manual_fallback` or `unavailable` with a reason. `test-connection` checks the same state.
 
 ### 6.2 Registry and lifecycle
 
@@ -212,8 +231,8 @@ configuration. Changing vendor = new class + new key; the pipeline is untouched.
   (`secret_ref = "DATAFORSEO_LOGIN"`), never the value. `GET /data-sources` returns `configured:
   true/false` and provider status, never the secret.
 - **Rate limiting** — token bucket per provider key in Redis, sized from
-  `data_sources.rate_limit_per_min` with a conservative default (e.g. Google Trends 30/min, DataForSEO
-  concurrent-task cap, eBay 5,000 calls/day app-level).
+  `data_sources.rate_limit_per_min` with a conservative default (e.g. Google BigQuery 10/min, eBay
+  Browse 5,000 calls/day app-level, Meta Ad Library per-token limits).
 - **Retries** — `tenacity` exponential backoff with jitter on 429/5xx/timeouts only. 4xx auth errors
   do not retry; they set `sync_status = error` with an actionable message.
 - **Circuit breaker** — after N consecutive failures a provider is skipped for a cooldown window and
@@ -241,6 +260,48 @@ fabricating live data. Both hold only if synthetic data is **structurally labell
   `data_quality.synthetic_share` is reported.
 
 This is the difference between a demo and a false claim about Australian consumer demand.
+
+### 6.4 Free-first provider set (implemented)
+
+No marketplace subscription is required for the MVP. Each provider is an independent plugin with the
+lifecycle above; enabling one does not change the scoring engine or schema. The full decision table,
+including the supersession of the paid Google Trends intermediary recommended in
+[`04-data-source-assessment.md`](04-data-source-assessment.md) and D1, is in
+[`06-free-first-gap-analysis.md`](06-free-first-gap-analysis.md) §2.
+
+| Provider key | Cost | Default | Evidence supplied |
+|---|---|---|---|
+| `mock` | synthetic | enabled | Deterministic demo series (labelled) |
+| `csv_import` | manual | enabled | Products and research observations |
+| `google_trends` | free | manual fallback | Relative search interest via CSV export |
+| `google_bigquery_trends` | free | needs credentials | Public `bigquery-public-data.google_trends` dataset |
+| `ebay_au` | free | needs credentials | Active listing prices/counts only |
+| `meta_ad_library` | free | needs credentials | Advertising activity only |
+| `amazon_public_research` | manual | manual fallback | Operator-recorded marketplace evidence |
+| `tiktok` | free | manual fallback | Operator-recorded social evidence |
+| `amazon_au` | free | unavailable | Legacy provenance only |
+| `exploding_topics` | paid | optional, disabled | Structural paid-plugin slot |
+| `cj_dropshipping` | free | optional, disabled | Supplier API access is conditional |
+
+No connector scrapes protected pages, bypasses authentication, solves CAPTCHAs or uses undocumented
+signed endpoints. Where no permitted automated route exists, the provider is `manual_fallback` and the
+operator records the observation with provenance.
+
+### 6.5 Recommendation gate (implemented)
+
+Scoring answers "how strong is the demand evidence?"; it does not answer "should this be added to the
+catalogue?". `backend/app/services/recommendations.py` adds a separate, evidence-aware gate:
+
+- six checks — demand, supplier price, delivery cost, contribution margin (≥25%), competition, and
+  evidence coverage (≥60%);
+- any failing check → `not_recommended`; any missing check → `investigate`; all pass → `recommended`;
+- missing supplier/delivery/margin evidence can never yield `recommended`, and a stale stored margin
+  without a supplier offer is treated as missing;
+- the response carries economics, missing evidence, next actions and a confirmation disclaimer;
+- it is surfaced on `GET /opportunities/recommendations` and in product detail.
+
+Supplier quotes and manual observations enter through the product endpoints (`/suppliers`,
+`/observations`, observation CSV import) and trigger metric and score recomputation.
 
 ---
 

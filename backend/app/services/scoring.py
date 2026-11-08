@@ -93,16 +93,24 @@ def estimate_contribution_margin(
     price_inc_gst: float | None, product_cost: float | None, shipping_cost: float | None
 ) -> float | None:
     """Return contribution margin percent after fees, fulfilment and returns."""
-    if not price_inc_gst or price_inc_gst <= 0:
+    profit = estimate_contribution_profit(price_inc_gst, product_cost, shipping_cost)
+    if profit is None or not price_inc_gst or price_inc_gst <= 0:
         return None
-    if product_cost is None:
+    price_ex = price_inc_gst / (1 + GST_RATE)
+    return round(profit / price_ex * 100.0, 2)
+
+
+def estimate_contribution_profit(
+    price_inc_gst: float | None, product_cost: float | None, shipping_cost: float | None
+) -> float | None:
+    """Return estimated contribution profit per unit, in the price currency."""
+    if not price_inc_gst or price_inc_gst <= 0 or product_cost is None:
         return None
     price_ex = price_inc_gst / (1 + GST_RATE)
     landed = float(product_cost) + float(shipping_cost or 0)
     fees = price_inc_gst * PAYMENT_FEE_PCT + PAYMENT_FEE_FIXED
     returns = price_inc_gst * (RETURN_ALLOWANCE_PCT / 100.0)
-    profit = price_ex - landed - fees - FULFILMENT - PACKAGING - returns
-    return round(profit / price_ex * 100.0, 2)
+    return round(price_ex - landed - fees - FULFILMENT - PACKAGING - returns, 2)
 
 
 def profitability_score(margin_pct: float | None) -> float | None:

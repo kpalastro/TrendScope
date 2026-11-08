@@ -233,6 +233,7 @@ def trend_series(db: Session, product_id, limit_days: int = 365) -> list[dict]:
     rows = db.execute(
         select(
             TrendObservation.metric_name,
+            TrendObservation.metric_type,
             TrendObservation.unit,
             TrendObservation.granularity,
             TrendObservation.country,
@@ -244,12 +245,15 @@ def trend_series(db: Session, product_id, limit_days: int = 365) -> list[dict]:
         .order_by(TrendObservation.metric_name, TrendObservation.observation_date)
     ).all()
 
-    grouped: dict[str, dict] = {}
+    # Group by metric *and type*: a search-interest index and an engagement
+    # count are not the same scale and must never share one series.
+    grouped: dict[tuple[str, str], dict] = {}
     for row in rows:
         entry = grouped.setdefault(
-            row.metric_name,
+            (row.metric_name, row.metric_type or "other"),
             {
                 "metric_name": row.metric_name,
+                "metric_type": row.metric_type or "other",
                 "unit": row.unit,
                 "granularity": row.granularity,
                 "country": row.country,
@@ -264,7 +268,7 @@ def trend_series(db: Session, product_id, limit_days: int = 365) -> list[dict]:
     for entry in grouped.values():
         entry["points"] = entry["points"][-limit_days:]
         series.append(entry)
-    return sorted(series, key=lambda item: item["metric_name"])
+    return sorted(series, key=lambda item: (item["metric_name"], item["metric_type"]))
 
 
 def product_sources(db: Session, product_id) -> list[dict]:
@@ -272,8 +276,19 @@ def product_sources(db: Session, product_id) -> list[dict]:
         select(
             DataSource.provider_key,
             DataSource.provider_name,
+            DataSource.cost_model,
+            DataSource.availability,
+            DataSource.availability_reason,
+            DataSource.usage_rights,
+            DataSource.docs_url,
+            DataSource.terms_url,
             TrendObservation.observation_date,
+            TrendObservation.metric_type,
+            TrendObservation.verification_status,
+            TrendObservation.data_quality,
+            TrendObservation.source_url,
             TrendObservation.is_synthetic.label("obs_synthetic"),
+            TrendObservation.collected_at,
         )
         .join(TrendObservation, TrendObservation.source_id == DataSource.id)
         .where(TrendObservation.product_id == product_id)
@@ -281,14 +296,33 @@ def product_sources(db: Session, product_id) -> list[dict]:
     ).all()
     seen: dict[str, dict] = {}
     for row in rows:
-        if row.provider_key in seen:
-            continue
-        seen[row.provider_key] = {
-            "provider_key": row.provider_key,
-            "provider_name": row.provider_name,
-            "collection_date": row.observation_date,
-            "is_synthetic": bool(row.obs_synthetic),
-        }
+        entry = seen.get(row.provider_key)
+        if entry is None:
+            entry = {
+                "provider_key": row.provider_key,
+                "provider_name": row.provider_name,
+                "cost_model": row.cost_model,
+                "availability": row.availability,
+                "availability_reason": row.availability_reason,
+                "usage_rights": row.usage_rights,
+                "docs_url": row.docs_url,
+                "terms_url": row.terms_url,
+                "collection_date": row.observation_date,
+                "collected_at": iso(row.collected_at),
+                "is_synthetic": bool(row.obs_synthetic),
+                "metric_types": [],
+                "verification_statuses": [],
+                "data_quality": [],
+                "source_url": row.source_url,
+            }
+            seen[row.provider_key] = entry
+        for field, value in (
+            ("metric_types", row.metric_type),
+            ("verification_statuses", row.verification_status),
+            ("data_quality", row.data_quality),
+        ):
+            if value and value not in entry[field]:
+                entry[field].append(value)
     return list(seen.values())
 
 

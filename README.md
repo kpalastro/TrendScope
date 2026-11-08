@@ -1,14 +1,21 @@
-# TrendScope AI — Phase 1
+# TrendScope AI — Phase 1 (free-first data)
 
 Australian eCommerce product-intelligence platform. TrendScope combines relative
 search interest, marketplace listings and supplier offers into an evidence-aware
 opportunity score, then lets you research candidates through a watchlist and
-weekly reports.
+weekly reports. It adds a **recommendation workflow**: a product is not marked
+ready for the catalogue until supplier price, delivery cost and contribution
+margin have been investigated.
 
-**Phase 1 is a runnable prototype.** It ships a deterministic synthetic provider
-and a CSV importer. Every synthetic record is labelled. No live marketplace,
-price, sales or supplier data is fabricated into the product, and no provider is
-scraped or accessed around its controls.
+**Phase 1 is a runnable prototype that starts with zero data subscriptions.** It
+ships a deterministic synthetic provider, CSV product/observation import and a
+manual research workflow. Optional connectors exist for Google Trends (public
+BigQuery dataset), eBay Australia (Browse API, active listings only), the Meta Ad
+Library and manual Google Trends/TikTok/Amazon research. Every synthetic or manual
+record is labelled, and no provider is scraped or accessed around its controls.
+
+The MVP runs without Jungle Scout, Helium 10, Exploding Topics or any marketplace
+subscription.
 
 ---
 
@@ -93,7 +100,19 @@ Schedules run in **Australia/Sydney**:
   pagination, CSV export.
 - **Ingestion** — deterministic mock provider (48 products, up to 400 days,
   keyed on `(slug, date)`, idempotent), CSV import with per-row validation and
-  line-number errors, manual product entry.
+  line-number errors, manual product entry, observations and supplier quotes.
+- **Free-first connectors** — a connector plugin framework with
+  `fetch_data`, `validate_data`, `normalize_data`, `get_source_status`,
+  `get_last_sync` and `handle_errors`; mock, CSV, Google Trends/BigQuery, eBay AU,
+  Meta Ad Library, TikTok manual fallback and Amazon public-research fallback.
+- **Observation provenance** — provider, collection time, period, market,
+  original metric, metric type, verification status, data quality and source URL
+  on every row.
+- **Cost visibility** — provider cost model, subscription cost, request usage,
+  estimated monthly spend, availability reason and connection health.
+- **Recommendation workflow** — `recommended` / `investigate` /
+  `not_recommended`, with pass/fail/missing checks and explicit next actions;
+  missing supplier, delivery or margin evidence can never produce `recommended`.
 - **Trend analysis** — 7/30/90-day comparisons, trend direction, staleness,
   monthly means and a 12-month seasonality index.
 - **Opportunity scoring** — six weighted components, coverage gating, confidence
@@ -110,7 +129,7 @@ Schedules run in **Australia/Sydney**:
   category mix, unavailable-data counts, limitations and CSV/JSON download.
 - **Auth** — Argon2id passwords, JWT bearer tokens, roles `admin`, `analyst`,
   `viewer`.
-- **Tests** — 68 backend unit and integration tests.
+- **Tests** — 86 backend unit and integration tests.
 
 ## Architecture at a glance
 
@@ -153,27 +172,40 @@ Recorded here so the documents and code do not silently disagree:
   a completed job record rather than polling a Celery task. The Celery worker and
   beat are wired for scheduled runs; the interactive endpoints stay synchronous
   in Phase 1 to keep local setup frictionless.
-- **Only the mock provider and CSV importer are enabled.** Other providers are
-  registered with explicit availability status and refuse sync with `501`.
+- **Only the mock, CSV and manual workflows are enabled by default.** Additional
+  connectors are installed plugins with an explicit availability state. A
+  connector without credentials or a permitted API refuses to run with a clear
+  reason instead of being scraped or approximated.
+- **The paid-plugin slot is structural, not promotional.** Exploding Topics and
+  future paid providers are registered as optional, disabled providers. Enabling
+  one changes no scoring table or code path; only a new connector class is added.
 - **Watchlist compare accepts product IDs.** The contract sketch used watchlist
   entry IDs; the UI sends `product_ids` because an entry can be removed while
   the comparison stays useful.
 
 ## Data sources
 
-| Provider | Phase 1 status | Notes |
-| --- | --- | --- |
-| Mock (`mock`) | **Enabled, synthetic** | Deterministic generator; no external calls |
-| CSV import (`csv_import`) | **Enabled** | UTF-8, 2 MB limit, per-row validation |
-| Google Trends (`google_trends`) | Registered, disabled | Requires authorised access |
-| eBay AU (`ebay_au`) | Registered, disabled | Marketplace listings only, no sales |
-| Exploding Topics (`exploding_topics`) | Registered, disabled | Paid API |
-| Amazon AU (`amazon_au`) | **Unavailable** | No first-party product API for AU |
-| TikTok (`tiktok`) | **Unavailable** | Creative Center not accessible from AU |
-| CJ Dropshipping (`cj_dropshipping`) | Registered, disabled | Supplier catalogue, authorised API |
+The default configuration costs nothing and needs no marketplace subscription.
+Connector rows below are independent plugins; enabling one does not alter the
+scoring engine or database design.
 
-No provider is contacted in Phase 1. Providers activate only with credentials
-supplied through environment variables and terms-compliant access.
+| Provider | Cost | Default state | Notes |
+| --- | --- | --- | --- |
+| Mock (`mock`) | synthetic | **Enabled** | Deterministic generator; no external calls |
+| CSV import (`csv_import`) | manual | **Enabled** | Products and research observations; UTF-8, 2 MB |
+| Google Trends (`google_trends`) | free | Manual fallback | No public API; use the CSV export |
+| Google BigQuery trends (`google_bigquery_trends`) | free | Needs credentials | Public `google_trends` dataset; optional `google-cloud-bigquery` extra |
+| eBay AU (`ebay_au`) | free | Needs credentials | Browse API active listings only; no sold data |
+| Meta Ad Library (`meta_ad_library`) | free | Needs credentials | Advertising activity only, not engagement or sales |
+| Amazon public research (`amazon_public_research`) | manual | Manual fallback | No first-party Amazon AU product API |
+| TikTok (`tiktok`) | free | Manual fallback | Creative Center is not available in AU; never scraped |
+| Amazon AU legacy (`amazon_au`) | free | Unavailable | Kept for provenance; refuses sync |
+| Exploding Topics (`exploding_topics`) | paid | Optional, disabled | Add later without changing scoring |
+| CJ Dropshipping (`cj_dropshipping`) | free | Optional, disabled | Supplier API access is conditional |
+
+A source can be tested without a provider call (`POST /data-sources/{id}/test-connection`).
+Sync refuses unavailable or unconfigured providers with a reason. The data-source
+screen shows cost, usage, availability and health for every provider.
 
 ## Scoring model
 
@@ -216,14 +248,23 @@ GET  /api/v1/products                 POST /api/v1/products
 GET  /api/v1/products/{slug|id}       PATCH/DELETE /api/v1/products/{id}
 GET  /api/v1/products/{id}/trends     GET /api/v1/products/{id}/score
 POST /api/v1/products/import/csv      GET /api/v1/products/import/csv/template
+GET  /api/v1/products/{id}/observations
+POST /api/v1/products/{id}/observations
+PATCH /api/v1/products/{id}/observations/{observation_id}
+POST /api/v1/products/{id}/suppliers
+PATCH /api/v1/products/{id}/suppliers/{offer_id}
+GET  /api/v1/products/import/observations/template
+POST /api/v1/products/import/observations/csv
 GET  /api/v1/trending                 GET /api/v1/emerging
-GET  /api/v1/opportunities            GET /api/v1/seasonal
+GET  /api/v1/opportunities            GET /api/v1/opportunities/recommendations
+GET  /api/v1/seasonal
 GET  /api/v1/categories               POST /api/v1/categories
 GET  /api/v1/watchlist                POST /api/v1/watchlist
 POST /api/v1/watchlist/compare        GET /api/v1/watchlist/export
 GET  /api/v1/reports                  POST /api/v1/reports
 GET  /api/v1/reports/{id}/download    GET /api/v1/exports/products
 GET  /api/v1/data-sources             POST /api/v1/data-sources/{id}/sync
+POST /api/v1/data-sources/{id}/test-connection
 GET  /api/v1/sync/status              GET /api/v1/scoring-profiles
 ```
 
@@ -238,14 +279,15 @@ use a consistent envelope:
 
 ```bash
 make test
-# 68 passed
+# 86 passed
 ```
 
 The suite runs against a temporary SQLite database per test. It covers growth
 window arithmetic, missing-data reasons, scoring renormalisation and shrinkage,
 competition classification, normalisation/slugging, auth, product reads, watchlist
-behaviour, CSV import validation, dashboard/report generation and sync
-idempotency.
+behaviour, CSV import validation, dashboard/report generation, sync idempotency,
+connector status gating, observation provenance, manual supplier/observation
+entry and recommendation verdicts.
 
 Alembic schema drift check:
 
@@ -259,16 +301,16 @@ cd backend && .venv/bin/alembic upgrade head && .venv/bin/alembic check
 backend/
   app/
     api/v1/          route modules
-    connectors/      base types, mock provider, catalogue
+    connectors/      framework, plugin registry, mock, CSV and free providers
     core/            config, database, security, errors
     jobs/            Celery app and tasks
-    services/        growth, scoring, metrics, ingestion, catalog, reports…
+    services/        growth, scoring, recommendations, metrics, ingestion, catalog, reports…
     main.py          FastAPI application
   alembic/           migrations
   tests/             unit and integration tests
 frontend/
-  src/app/           routes: dashboard, products, trending, categories,
-                     watchlist, reports, sources, login
+  src/app/           routes: dashboard, products, opportunities, trending,
+                     categories, watchlist, reports, sources, login
   src/components/    shell, auth provider, tables, UI primitives
   src/lib/           API client, types, formatting, fetch hook
 docs/                architecture, ERD, API contract, source assessment, plan
@@ -298,12 +340,22 @@ docker-compose.yml   db, redis, backend, worker, beat, frontend
 
 ## Limitations and next phases
 
-- Social signal, Amazon AU and TikTok data are unavailable; the score renormalises
-  around their absence and says so.
-- Marketplace listings are not sales. Review counts and listing counts are
-  proxies only.
-- Supplier costs and margins are estimates from a synthetic catalogue.
+- Social signal and Amazon AU/TikTok automation are unavailable; the score
+  renormalises around their absence and says so. Those sources can still be
+  entered manually with provenance.
+- Marketplace listings are not sales. Review counts, listing counts and ad
+  activity are proxies only. `actual_sales` and `estimated_sales` are distinct
+  metric types and are never merged with search interest or engagement.
+- Supplier costs and margins are estimates. A `recommended` verdict requires
+  recorded supplier and delivery costs but still asks the operator to confirm the
+  quote; it is not a sales forecast.
+- Google Trends has no public API. The free automation route is the public
+  BigQuery dataset; otherwise use the CSV/manual workflow.
 - Phase 1 endpoints run ingestion synchronously; Phase 2 moves the interactive
   jobs onto Celery with pollable job resources.
-- Real providers require authorised API access, credentials and terms review
-  before they are enabled.
+- Real providers require authorised API access, credentials and a terms review
+  before they are enabled. A paid web subscription is not treated as an API or
+  redistribution licence.
+- Start with 60–90 days of your own collected history before deciding whether any
+  paid source earns its cost; the source screen records cost and usage to make
+  that decision possible.

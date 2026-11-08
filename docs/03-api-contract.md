@@ -278,7 +278,12 @@ seasonal | best_margins | recently_discovered`. Common params: `country=AU` (def
 | GET | `/products/{id}` | V | detail (`?include=series,listings,suppliers`) |
 | PATCH | `/products/{id}` | N | edit catalogue fields |
 | DELETE | `/products/{id}` | A | archive (soft) |
-| GET | `/products/{id}/trends` | V | observation series |
+| GET | `/products/{id}/trends` | V | observation series (separate series per `metric_name` + `metric_type`) |
+| GET | `/products/{id}/observations` | V | provenance rows; filter by `metric_type` |
+| POST | `/products/{id}/observations` | N | manual observation with full provenance; `409` on duplicate natural key |
+| PATCH | `/products/{id}/observations/{observation_id}` | N | correct a manual/CSV row; appends a correction log |
+| POST | `/products/{id}/suppliers` | N | record a supplier quote; creates the supplier/offer if new |
+| PATCH | `/products/{id}/suppliers/{offer_id}` | N | update a quote; recomputes margin and recommendation |
 | GET | `/products/{id}/metrics` | V | daily snapshots |
 | GET | `/products/{id}/score` | V | latest + `?history=true` |
 | GET | `/products/{id}/listings` | V | marketplace listings |
@@ -290,6 +295,8 @@ seasonal | best_margins | recently_discovered`. Common params: `country=AU` (def
 | POST | `/products/matches/{id}/resolve` | A | `{action: "merge" | "reject"}` |
 | POST | `/products/import/csv` | N | multipart upload → 202 `Job` |
 | GET | `/products/import/csv/template` | V | download template with required columns |
+| POST | `/products/import/observations/csv` | N | bulk manual observations → 202; row-level errors |
+| GET | `/products/import/observations/template` | V | observation CSV template |
 | POST | `/products/discover` | N | run discovery connectors → 202 `Job` |
 
 `GET /products` query parameters:
@@ -318,11 +325,18 @@ seasonal | best_margins | recently_discovered`. Common params: `country=AU` (def
 | GET | `/trending` | V | `?window=7|30|90&direction=rising|declining&limit=20` |
 | GET | `/emerging` | V | newly discovered + accelerating demand |
 | GET | `/opportunities` | V | score ≥ threshold, coverage-gated |
+| GET | `/opportunities/recommendations` | V | `recommended`/`investigate`/`not_recommended` gate with checks, economics and missing evidence |
 | GET | `/seasonal` | V | `?horizon_days=45|90` upcoming seasonal opportunities |
 
 These are read models over `product_metrics`, not separate data. `emerging` requires a `discovered_at`
 within `?since_days=30` AND positive 7d growth — both must hold, otherwise a product is "new",
 not "emerging".
+
+`GET /opportunities/recommendations` is deliberately separate from the opportunity score. It returns
+`verdict` (`recommended`, `investigate`, `not_recommended`), per-evidence `checks`
+(`pass`/`fail`/`missing`), `missing_evidence`, `next_actions`, `economics` and a disclaimer. A product
+without a recorded supplier price, delivery cost and positive contribution margin cannot be
+`recommended`. Query parameters: `verdict`, `min_coverage`, `limit`, `synthetic`.
 
 ### 6.5 Categories
 
@@ -466,22 +480,42 @@ Decimal strings keep the arithmetic audit-proof.
 {
   "id": "…",
   "provider_key": "google_trends",
-  "provider_name": "Google Trends (DataForSEO)",
+  "provider_name": "Google Trends",
   "source_type": "search_trend",
   "enabled": true,
-  "configured": true,
+  "configured": false,
   "is_synthetic": false,
-  "config": {"geo": "AU", "max_keywords_per_run": 200},
-  "secret_ref": ["DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD"],
-  "rate_limit_per_min": 30,
-  "sync_status": "ok",
-  "last_sync_at": "2026-11-07T02:00:00Z",
-  "next_sync_at": "2026-11-08T02:00:00Z",
+  "cost_model": "free",
+  "monthly_cost": "0.00",
+  "cost_currency": "USD",
+  "request_limit_month": null,
+  "requests_used_month": 0,
+  "estimated_monthly_spend": "0.00",
+  "usage_period": "2026-11",
+  "availability": "manual_fallback",
+  "availability_reason": "No public keyword API; use the export or the BigQuery dataset.",
+  "usage_rights": "Provider terms apply",
+  "docs_url": "https://trends.google.com/trends/explore",
+  "terms_url": "https://policies.google.com/terms",
+  "health": "manual",
+  "connector": {
+    "installed": true,
+    "available": false,
+    "state": "manual_fallback",
+    "reason": "No public keyword API; use the export or the BigQuery dataset."
+  },
+  "config": {"geo": "AU"},
+  "secret_ref": [],
+  "sync_status": "never_run",
+  "last_sync_at": null,
+  "last_success_at": null,
   "last_error": null
 }
 ```
 
 `secret_ref` exposes **names only** — it tells an admin which variables to set, not their values.
+`estimated_monthly_spend` is the declared subscription cost plus any metered usage; it is never
+presented as a quote.
 
 ### 6.11 Scoring profiles and recalculation
 

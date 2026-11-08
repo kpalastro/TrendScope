@@ -100,22 +100,29 @@ reversible in the audit log.
 
 ---
 
-### M4 — Connector framework and Google Trends (4–6 days) — **decision D1 required**
+### M4 — Connector framework and free-first providers (4–6 days) — **supersedes decision D1**
 
 **Deliverables**
-- `Connector` protocol, registry, `data_sources` wiring, per-source advisory lock, retries with
-  jitter, Redis token-bucket rate limiter, circuit breaker, `ingestion_runs` bookkeeping.
-- `google_trends/dataforseo.py` (production), `google_trends/mock.py` (synthetic), `csv_import.py`.
-- `GET/PATCH /data-sources`, `test-connection`, `POST /sync`, `/sync/status`, `/jobs/{id}`.
+- `BaseConnector` lifecycle (`fetch_data`, `validate_data`, `normalize_data`, `get_source_status`,
+  `get_last_sync`, `handle_errors`), registry, `data_sources` wiring, `ingestion_runs` bookkeeping.
+  Implemented synchronously in Phase 1; per-source locks and retry/rate-limit hooks remain the
+  documented extension points.
+- Free-first plugins: `mock`, `csv_import`, `google_trends` (manual fallback), `google_bigquery_trends`
+  (public dataset, optional credentials), `ebay_au` (Browse API, active listings), `meta_ad_library`
+  (advertising only), `amazon_public_research` and `tiktok` (manual fallbacks), legacy `amazon_au`
+  (unavailable), plus disabled optional plugins `exploding_topics` (paid) and `cj_dropshipping`.
+- `GET/PATCH /data-sources`, `test-connection`, `POST /sync`, `/sync/status`, `/data-sources/{id}/runs`.
+- Cost/usage/availability fields on every source; no provider is enabled merely by having a web
+  subscription.
 - Celery app + beat schedule with `Australia/Sydney`; `job_schedules` sync.
 
-**Tests (PRD §13):** API failure handling (429/500/timeout → retry then `partial`); retry backoff
-bounded; rate limiter blocks; one provider failing does not stop others; cursor/incremental sync
-resumes; observation idempotency on re-ingest; secrets never serialised in `test-connection` responses.
+**Tests (PRD §13):** connector status derivation per availability state (no network); unconfigured
+sync returns `503` with a reason; one provider failing does not stop others; observation idempotency
+on re-ingest; provenance round-trip; secrets never serialised in `test-connection` responses.
 
-**Exit criteria:** with only `mock` enabled, the pipeline populates observations end-to-end; with a
-real DataForSEO key, a manual sync produces genuine `search_interest` rows for AU; `GET /sync/status`
-reflects both.
+**Exit criteria:** with only `mock`, CSV and manual entry, the pipeline populates observations
+end-to-end and the app runs with zero data subscriptions; with valid credentials, a real provider can
+be enabled without touching scoring or schema.
 
 ---
 
@@ -255,7 +262,7 @@ with secrets stripped. No real customer data, no copied marketplace listings sto
 
 | # | Decision | Options | Recommendation | Needed by |
 |---|---|---|---|---|
-| **D1** | Google Trends data route | DataForSEO (~US$165/mo at 500 products daily, ~US$38 weekly) · SerpApi (cheaper at low volume) · apply for official alpha · `pytrends` (rejected: archived, brittle, ToS risk) | **DataForSEO, weekly cadence at MVP**, configurable | M4 |
+| **D1** | Google Trends data route | **Free-first (adopted 2026-11-08):** manual CSV export + public BigQuery `google_trends` dataset · DataForSEO (~US$165/mo) · SerpApi · official alpha · `pytrends` (rejected: archived, brittle, ToS risk) | **Free routes for the MVP.** Revisit a paid intermediary only after 60–90 days of own collected history shows the free route's coverage is the limiting factor. See [`06-free-first-gap-analysis.md`](06-free-first-gap-analysis.md). | M4 (resolved) |
 | **D2** | Amazon AU strategy | Mock-only (Phase 2) · licensed scraping vendor + legal review · defer entirely | **Mock-only until legal sign-off**; do not spend on a vendor before Phase 1 acceptance | Phase 2 |
 | **D3** | Social signal | No live source · licensed TikTok data vendor · manual/CSV research | **Manual/CSV + mock now**; revisit when a vendor is contracted | Phase 2 |
 | **D4** | Tenancy | Single-tenant, one workspace, multiple users with roles (proposed) · multi-tenant SaaS | **Single-tenant**; schema already carries `user_id`, so multi-tenant is additive later | M2 |

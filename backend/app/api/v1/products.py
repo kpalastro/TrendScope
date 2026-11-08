@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 import math
 from datetime import date
 from typing import Annotated, Literal
@@ -9,6 +11,7 @@ from fastapi import APIRouter, File, Query, Response, UploadFile
 from sqlalchemy import select
 
 from app.api.deps import AdminUser, CurrentUser, DbSession, WriteUser
+from app.connectors.csv_source import OBSERVATION_COLUMNS, CSVImportConnector
 from app.core.errors import ApiError
 from app.models import (
     Category,
@@ -23,7 +26,14 @@ from app.models import (
     TrendObservation,
     utcnow,
 )
-from app.schemas import ProductCreate, ProductPatch
+from app.schemas import (
+    ObservationCorrect,
+    ObservationCreate,
+    ProductCreate,
+    ProductPatch,
+    SupplierOfferCreate,
+    SupplierOfferPatch,
+)
 from app.services import importing
 from app.services.catalog import (
     get_product_row,
@@ -35,7 +45,6 @@ from app.services.catalog import (
 from app.services.competition import competition_index, price_dispersion_component, review_concentration_component
 from app.services.metrics import compute_product_metrics
 from app.services.normalise import normalise_name, slugify
-from app.services.slugs import unique_external_id, unique_product_slug
 from app.services.presenters import (
     DISCLAIMER,
     as_float,
@@ -45,7 +54,9 @@ from app.services.presenters import (
     score_breakdown,
     trend_series,
 )
+from app.services.recommendations import build_recommendation, cheapest_offer
 from app.services.scoring_service import compute_product_score, get_active_profile
+from app.services.slugs import unique_external_id, unique_product_slug
 
 router = APIRouter(prefix="/products", tags=["products"])
 
@@ -163,6 +174,21 @@ def _competition(db, row) -> dict | None:
     }
 
 
+def _recompute(db, product: Product, as_of: date | None = None) -> None:
+    as_of = as_of or date.today()
+    metric = compute_product_metrics(db, product, as_of)
+    profile = get_active_profile(db)
+    if profile is not None:
+        compute_product_score(db, product, metric, profile, as_of)
+
+
+def _recommendation(db, row) -> dict:
+    offer, supplier = cheapest_offer(db, row.product.id)
+    return build_recommendation(
+        row.product, row.metric, row.score, offer, supplier
+    )
+
+
 def detail_payload(db, row) -> dict:
     from app.services.catalog import profile_for_score
 
@@ -191,6 +217,7 @@ def detail_payload(db, row) -> dict:
                 score_breakdown(score, profile_for_score(db, score)) for score in scores
             ],
             "sources": product_sources(db, row.product.id),
+            "recommendation": _recommendation(db, row),
             "disclaimer": DISCLAIMER,
         }
     )
@@ -409,6 +436,477 @@ def create_product(payload: ProductCreate, user: WriteUser, db: DbSession) -> di
     db.commit()
     row = _require_row(db, product.id)
     return detail_payload(db, row)
+
+
+def _manual_source(db) -> DataSource:
+    source = db.execute(
+        select(DataSource).where(DataSource.provider_key == "csv_import")
+    ).scalar_one_or_none()
+    if source is None:
+        raise ApiError(
+            503, "SOURCE_UNAVAILABLE", "The manual CSV / research source is not configured."
+        )
+    return source
+
+
+def _observation_payload(observation: TrendObservation) -> dict:
+    return {
+        "id": observation.id,
+        "product_id": observation.product_id,
+        "source_id": observation.source_id,
+        "metric_name": observation.metric_name,
+        "metric_type": observation.metric_type,
+        "value": as_float(observation.metric_value),
+        "unit": observation.unit,
+        "granularity": observation.granularity,
+        "observation_date": observation.observation_date,
+        "period_start": observation.period_start,
+        "period_end": observation.period_end,
+        "country": observation.country,
+        "currency": observation.currency,
+        "provider_name": observation.provider_name,
+        "source_url": observation.source_url,
+        "verification_status": observation.verification_status,
+        "data_quality": observation.data_quality,
+        "original_metric": observation.original_metric,
+        "confidence": round(float(observation.confidence), 3),
+        "is_synthetic": bool(observation.is_synthetic),
+        "collected_at": observation.collected_at,
+        "notes": (observation.meta or {}).get("notes"),
+    }
+
+
+def _product_lookup(db) -> tuple[dict[str, Product], dict[str, Product]]:
+    """Map product names/slugs/external ids to products, and the reverse."""
+    products = (
+        db.execute(select(Product).where(Product.status == "active")).scalars().all()
+    )
+    by_key: dict[str, Product] = {}
+    by_external: dict[str, Product] = {}
+    for product in products:
+        external = product.external_id or product.slug
+        by_external[external] = product
+        for key in (product.name, product.slug, external):
+            if key:
+                by_key[str(key).lower()] = product
+    return by_key, by_external
+
+
+@router.get("/import/observations/template")
+def observation_template(user: CurrentUser) -> Response:
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(OBSERVATION_COLUMNS)
+    writer.writerow(
+        [
+            "Silicone Kitchen Organisation Tray",
+            "search_interest",
+            "search_interest",
+            "52",
+            "index",
+            date.today().isoformat(),
+            "",
+            "",
+            "https://trends.google.com/trends/explore?geo=AU",
+            "unverified",
+            "medium",
+            "Google Trends export, transcribed by hand",
+        ]
+    )
+    return Response(
+        content=buffer.getvalue(),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": 'attachment; filename="trendscope-observations-template.csv"'
+        },
+    )
+
+
+@router.post("/import/observations/csv", status_code=202)
+async def import_observations_csv(
+    user: WriteUser,
+    db: DbSession,
+    file: UploadFile = File(...),
+) -> dict:
+    """Import operator-supplied research observations (manual free fallback).
+
+    Every row keeps its declared metric type, verification status and source URL;
+    nothing is presented as a live measurement. Unknown products and invalid
+    rows are rejected with their row number instead of being dropped.
+    """
+    source = _manual_source(db)
+    raw = await file.read(MAX_CSV_BYTES + 1)
+    if len(raw) > MAX_CSV_BYTES:
+        raise ApiError(422, "BUSINESS_RULE_VIOLATION", "CSV file exceeds 2 MB.")
+    try:
+        content = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ApiError(422, "VALIDATION_ERROR", "CSV must be UTF-8 encoded.") from exc
+
+    try:
+        reader = csv.DictReader(io.StringIO(content))
+        raw_rows = list(reader)
+    except csv.Error as exc:
+        raise ApiError(422, "VALIDATION_ERROR", f"Could not read CSV: {exc}") from exc
+    if not raw_rows:
+        raise ApiError(422, "VALIDATION_ERROR", "CSV contains no data rows.")
+
+    rows = [
+        {(key or "").strip().lower(): (value or "").strip() for key, value in raw.items()}
+        for raw in raw_rows
+    ]
+    by_key, by_external = _product_lookup(db)
+    external_id_for = {
+        key: (product.external_id or product.slug) for key, product in by_key.items()
+    }
+    connector = CSVImportConnector()
+    records, errors = connector.observations_from_rows(
+        rows, external_id_for=external_id_for
+    )
+
+    existing = {
+        (
+            item.product_id,
+            item.observation_date,
+            item.metric_name,
+            item.granularity,
+        )
+        for item in db.execute(
+            select(TrendObservation).where(TrendObservation.source_id == source.id)
+        ).scalars()
+    }
+    created = 0
+    skipped = 0
+    touched: set = set()
+    for record in records:
+        product = by_external.get(record.external_id)
+        if product is None:
+            errors.append(
+                {"row": None, "issue": f"unknown product: {record.external_id}"}
+            )
+            continue
+        key = (
+            product.id,
+            record.observation_date,
+            record.metric_name,
+            record.granularity,
+        )
+        if key in existing:
+            skipped += 1
+            continue
+        existing.add(key)
+        db.add(
+            TrendObservation(
+                product_id=product.id,
+                source_id=source.id,
+                observation_date=record.observation_date,
+                granularity=record.granularity,
+                metric_name=record.metric_name,
+                metric_type=record.metric_type or "other",
+                metric_value=record.metric_value,
+                unit=record.unit,
+                country="AU",
+                currency="AUD" if record.unit == "aud" else None,
+                provider_name=source.provider_name,
+                period_start=record.period_start or record.observation_date,
+                period_end=record.period_end or record.observation_date,
+                source_url=record.source_url,
+                verification_status=record.verification_status,
+                data_quality=record.data_quality,
+                original_metric=record.original_metric,
+                confidence=record.confidence,
+                is_synthetic=False,
+                source_timestamp=utcnow(),
+                collected_at=utcnow(),
+                meta=record.meta or {},
+            )
+        )
+        touched.add(product.id)
+        created += 1
+
+    db.flush()
+    for product_id in touched:
+        product = db.get(Product, product_id)
+        if product is not None:
+            _recompute(db, product)
+    if created:
+        source.last_success_at = utcnow()
+    db.commit()
+    return {
+        "created": created,
+        "skipped": skipped,
+        "rejected": len(errors),
+        "errors": errors,
+    }
+
+
+@router.get("/{identifier}/observations")
+def product_observations(
+    identifier: str,
+    user: CurrentUser,
+    db: DbSession,
+    metric_type: str | None = None,
+    limit: int = 500,
+) -> dict:
+    row = _require_row(db, identifier)
+    stmt = (
+        select(TrendObservation)
+        .where(TrendObservation.product_id == row.product.id)
+        .order_by(TrendObservation.observation_date.desc(), TrendObservation.id.desc())
+        .limit(max(1, min(limit, 2000)))
+    )
+    if metric_type:
+        stmt = stmt.where(TrendObservation.metric_type == metric_type)
+    observations = db.execute(stmt).scalars().all()
+    return {
+        "product_id": row.product.id,
+        "observations": [_observation_payload(item) for item in observations],
+    }
+
+
+@router.post("/{identifier}/observations", status_code=201)
+def create_product_observation(
+    identifier: str,
+    payload: ObservationCreate,
+    user: WriteUser,
+    db: DbSession,
+) -> dict:
+    row = _require_row(db, identifier)
+    source = _manual_source(db)
+    country = (payload.country or row.product.country or "AU").upper()
+    existing = db.execute(
+        select(TrendObservation).where(
+            TrendObservation.product_id == row.product.id,
+            TrendObservation.source_id == source.id,
+            TrendObservation.observation_date == payload.observation_date,
+            TrendObservation.metric_name == payload.metric_name,
+            TrendObservation.granularity == payload.granularity,
+            TrendObservation.country == country,
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise ApiError(
+            409,
+            "CONFLICT",
+            "An observation already exists for this metric, date, granularity and country. "
+            f"Correct observation {existing.id} instead of adding a duplicate.",
+        )
+    observation = TrendObservation(
+        product_id=row.product.id,
+        source_id=source.id,
+        observation_date=payload.observation_date,
+        granularity=payload.granularity,
+        metric_name=payload.metric_name,
+        metric_type=payload.metric_type,
+        metric_value=payload.value,
+        unit=payload.unit,
+        country=country,
+        currency=payload.currency or (row.product.currency if payload.metric_type == "marketplace_price" else None),
+        provider_name=payload.provider_name,
+        period_start=payload.period_start or payload.observation_date,
+        period_end=payload.period_end or payload.observation_date,
+        source_url=payload.source_url,
+        verification_status=payload.verification_status,
+        data_quality=payload.data_quality,
+        original_metric=payload.original_metric or payload.metric_name,
+        confidence=payload.confidence,
+        is_synthetic=False,
+        source_timestamp=utcnow(),
+        collected_at=utcnow(),
+        meta={"origin": "manual_entry", "notes": payload.notes},
+    )
+    db.add(observation)
+    db.flush()
+    _recompute(db, row.product)
+    source.last_success_at = utcnow()
+    db.commit()
+    fresh = _require_row(db, row.product.id)
+    return {
+        "observation": _observation_payload(observation),
+        "recommendation": _recommendation(db, fresh),
+    }
+
+
+@router.patch("/{identifier}/observations/{observation_id}")
+def correct_product_observation(
+    identifier: str,
+    observation_id: int,
+    payload: ObservationCorrect,
+    user: WriteUser,
+    db: DbSession,
+) -> dict:
+    row = _require_row(db, identifier)
+    observation = db.get(TrendObservation, observation_id)
+    if observation is None or observation.product_id != row.product.id:
+        raise ApiError(404, "NOT_FOUND", "Observation not found for this product.")
+    source = db.get(DataSource, observation.source_id)
+    if source is None or source.provider_key != "csv_import":
+        raise ApiError(
+            409,
+            "BUSINESS_RULE_VIOLATION",
+            "Only operator-entered observations can be corrected; connector history is append-only.",
+        )
+    changes = {
+        key: value
+        for key, value in payload.model_dump(exclude_none=True).items()
+        if key in {"value", "verification_status", "data_quality", "source_url", "notes", "reason"}
+    }
+    if not changes:
+        raise ApiError(422, "VALIDATION_ERROR", "No correction fields were supplied.")
+    meta = dict(observation.meta or {})
+    corrections = list(meta.get("corrections") or [])
+    corrections.append(
+        {
+            "at": utcnow().isoformat(),
+            "previous_value": as_float(observation.metric_value),
+            "previous_verification": observation.verification_status,
+            **{key: str(value) for key, value in changes.items()},
+        }
+    )
+    meta["corrections"] = corrections
+    observation.meta = meta
+    if payload.value is not None:
+        observation.metric_value = payload.value
+    if payload.verification_status is not None:
+        observation.verification_status = payload.verification_status
+    if payload.data_quality is not None:
+        observation.data_quality = payload.data_quality
+    if payload.source_url is not None:
+        observation.source_url = payload.source_url
+    if payload.notes is not None:
+        meta["notes"] = payload.notes
+    observation.collected_at = utcnow()
+    db.flush()
+    _recompute(db, row.product)
+    db.commit()
+    fresh = _require_row(db, row.product.id)
+    return {
+        "observation": _observation_payload(observation),
+        "recommendation": _recommendation(db, fresh),
+    }
+
+
+@router.post("/{identifier}/suppliers", status_code=201)
+def add_product_supplier(
+    identifier: str,
+    payload: SupplierOfferCreate,
+    user: WriteUser,
+    db: DbSession,
+) -> dict:
+    """Record a supplier quote — the evidence the recommendation workflow needs."""
+    row = _require_row(db, identifier)
+    source = _manual_source(db)
+    supplier = db.execute(
+        select(Supplier).where(
+            Supplier.platform_key == payload.platform_key,
+            Supplier.supplier_name == payload.supplier_name,
+        )
+    ).scalar_one_or_none()
+    created_supplier = False
+    if supplier is None:
+        supplier = Supplier(
+            supplier_name=payload.supplier_name,
+            platform_key=payload.platform_key,
+            source_id=source.id,
+            is_synthetic=False,
+        )
+        db.add(supplier)
+        db.flush()
+        created_supplier = True
+    supplier.supplier_url = payload.supplier_url or supplier.supplier_url
+    supplier.country = (payload.country or supplier.country or "").upper() or None
+    if payload.supplier_rating is not None:
+        supplier.supplier_rating = payload.supplier_rating
+    supplier.source_id = source.id
+
+    external_id = payload.external_product_id or f"manual-{row.product.slug}"
+    offer = db.execute(
+        select(SupplierProduct).where(
+            SupplierProduct.supplier_id == supplier.id,
+            SupplierProduct.external_product_id == external_id,
+        )
+    ).scalar_one_or_none()
+    created = False
+    if offer is None:
+        offer = SupplierProduct(
+            product_id=row.product.id,
+            supplier_id=supplier.id,
+            external_product_id=external_id,
+        )
+        db.add(offer)
+        created = True
+    offer.supplier_url = payload.supplier_url or offer.supplier_url
+    offer.product_cost = payload.product_cost
+    offer.shipping_cost = payload.shipping_cost
+    offer.currency = payload.currency.upper()
+    offer.minimum_order_quantity = payload.minimum_order_quantity
+    offer.lead_time_days = payload.lead_time_days
+    offer.availability = payload.availability
+    offer.last_checked_at = utcnow()
+    db.flush()
+    _recompute(db, row.product)
+    source.last_success_at = utcnow()
+    db.commit()
+    fresh = _require_row(db, row.product.id)
+    return {
+        "created": created,
+        "supplier_created": created_supplier,
+        "suppliers": _suppliers(db, row.product.id),
+        "recommendation": _recommendation(db, fresh),
+    }
+
+
+@router.patch("/{identifier}/suppliers/{offer_id}")
+def patch_product_supplier(
+    identifier: str,
+    offer_id: UUID,
+    payload: SupplierOfferPatch,
+    user: WriteUser,
+    db: DbSession,
+) -> dict:
+    row = _require_row(db, identifier)
+    offer = db.get(SupplierProduct, offer_id)
+    if offer is None or offer.product_id != row.product.id:
+        raise ApiError(404, "NOT_FOUND", "Supplier offer not found for this product.")
+    supplier = db.get(Supplier, offer.supplier_id)
+    if supplier is None:
+        raise ApiError(404, "NOT_FOUND", "Supplier not found.")
+
+    if payload.supplier_name is not None and payload.supplier_name != supplier.supplier_name:
+        clash = db.execute(
+            select(Supplier.id).where(
+                Supplier.platform_key == supplier.platform_key,
+                Supplier.supplier_name == payload.supplier_name,
+            )
+        ).first()
+        if clash is not None:
+            raise ApiError(409, "CONFLICT", "A supplier with this name already exists.")
+        supplier.supplier_name = payload.supplier_name
+
+    for field in ("supplier_url", "country", "supplier_rating"):
+        value = getattr(payload, field)
+        if value is not None:
+            setattr(supplier, field, value.upper() if field == "country" else value)
+    for field in (
+        "product_cost",
+        "shipping_cost",
+        "currency",
+        "minimum_order_quantity",
+        "lead_time_days",
+        "availability",
+    ):
+        value = getattr(payload, field)
+        if value is not None:
+            setattr(offer, field, value.upper() if field == "currency" else value)
+    offer.last_checked_at = utcnow()
+    db.flush()
+    _recompute(db, row.product)
+    db.commit()
+    fresh = _require_row(db, row.product.id)
+    return {
+        "suppliers": _suppliers(db, row.product.id),
+        "recommendation": _recommendation(db, fresh),
+    }
 
 
 @router.get("/{identifier}")

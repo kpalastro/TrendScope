@@ -77,6 +77,7 @@ export type TrendPoint = { date: string; value: number | null };
 
 export type ObservationSeries = {
   metric_name: string;
+  metric_type: string;
   unit: string | null;
   granularity: string;
   country: string;
@@ -142,6 +143,63 @@ export type Competition = {
   classified_at: string | null;
 };
 
+export type RecommendationCheck = {
+  key: string;
+  label: string;
+  status: "pass" | "fail" | "missing";
+  detail: string;
+};
+
+export type RecommendationEconomics = {
+  currency: string;
+  market_price: string | null;
+  product_cost: string | null;
+  delivery_cost: string | null;
+  landed_cost: string | null;
+  estimated_profit_per_unit: string | null;
+  estimated_margin_pct: number | null;
+  supplier_name: string | null;
+  supplier_is_synthetic: boolean | null;
+};
+
+export type Recommendation = {
+  verdict: "recommended" | "investigate" | "not_recommended";
+  label: string;
+  summary: string;
+  checks: RecommendationCheck[];
+  missing_evidence: string[];
+  next_actions: { key: string; action: string }[];
+  economics: RecommendationEconomics;
+  thresholds: { min_margin_pct: number; min_coverage_pct: number };
+  disclaimer: string;
+  generated_at: string;
+};
+
+export type ObservationRow = {
+  id: number;
+  product_id: string;
+  source_id: string;
+  metric_name: string;
+  metric_type: string;
+  value: number;
+  unit: string | null;
+  granularity: string;
+  observation_date: string;
+  period_start: string | null;
+  period_end: string | null;
+  country: string;
+  currency: string | null;
+  provider_name: string | null;
+  source_url: string | null;
+  verification_status: string;
+  data_quality: string;
+  original_metric: string | null;
+  confidence: number;
+  is_synthetic: boolean;
+  collected_at: string;
+  notes: string | null;
+};
+
 export type ProductDetail = ProductSummary & {
   description: string | null;
   keywords: string[];
@@ -156,10 +214,38 @@ export type ProductDetail = ProductSummary & {
   sources: {
     provider_key: string;
     provider_name: string;
+    cost_model: string;
+    availability: string;
+    availability_reason: string | null;
+    usage_rights: string;
+    docs_url: string | null;
+    terms_url: string | null;
     collection_date: string | null;
+    collected_at: string | null;
     is_synthetic: boolean;
+    metric_types: string[];
+    verification_statuses: string[];
+    data_quality: string[];
+    source_url: string | null;
   }[];
+  recommendation: Recommendation;
   disclaimer: string;
+};
+
+export type RecommendationItem = {
+  product: ProductSummary;
+  recommendation: Recommendation;
+};
+
+export type RecommendationsResponse = {
+  data: RecommendationItem[];
+  meta: {
+    generated_at: string;
+    note: string;
+    min_coverage: number;
+    verdict: string;
+    counts: Record<string, number>;
+  };
 };
 
 export type WidgetItem = {
@@ -235,6 +321,18 @@ export type DiscoverResponse = {
   };
 };
 
+export type SourceConnector = {
+  installed: boolean;
+  state: string;
+  available: boolean;
+  configured: boolean;
+  reason: string | null;
+  credential_names: string[];
+  docs_url: string | null;
+  terms_url: string | null;
+  cost_model: string;
+};
+
 export type DataSource = {
   id: string;
   provider_key: string;
@@ -248,8 +346,23 @@ export type DataSource = {
   rate_limit_per_min: number;
   sync_status: string;
   last_sync_at: string | null;
+  last_success_at: string | null;
   last_error: string | null;
   consecutive_failures: number;
+  cost_model: string;
+  monthly_cost: string | null;
+  cost_currency: string;
+  estimated_monthly_spend: string | null;
+  request_limit_month: number | null;
+  requests_used_month: number;
+  usage_period: string | null;
+  availability: string;
+  availability_reason: string | null;
+  usage_rights: string;
+  docs_url: string | null;
+  terms_url: string | null;
+  health: string;
+  connector: SourceConnector;
 };
 
 export type IngestionRun = {
