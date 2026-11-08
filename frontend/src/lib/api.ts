@@ -79,37 +79,82 @@ type RequestOptions = {
   signal?: AbortSignal;
   /** Skip the redirect-on-401 behaviour (used by the login screen). */
   noRedirect?: boolean;
+  /** Do not attempt a refresh on 401 (used by the refresh call itself). */
+  skipRefresh?: boolean;
 };
 
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const headers: Record<string, string> = { Accept: "application/json" };
-  const token = getToken();
-  if (token) headers.Authorization = `Bearer ${token}`;
+let refreshInFlight: Promise<boolean> | null = null;
 
-  let body: BodyInit | undefined;
-  if (options.formData) {
-    body = options.formData;
-  } else if (options.body !== undefined) {
-    headers["Content-Type"] = "application/json";
-    body = JSON.stringify(options.body);
+/**
+ * Exchange the HttpOnly refresh cookie for a new access token. Concurrent
+ * 401s share one request: the refresh token rotates on every use, so two
+ * parallel refreshes would present the same token twice and be treated as
+ * reuse, revoking the whole session.
+ */
+function refreshAccessToken(): Promise<boolean> {
+  if (typeof window === "undefined") return Promise.resolve(false);
+  if (!refreshInFlight) {
+    refreshInFlight = request<import("./types").LoginResponse>("/auth/refresh", {
+      method: "POST",
+      noRedirect: true,
+      skipRefresh: true,
+    })
+      .then((result) => {
+        setSession(result.access_token, result.user);
+        return true;
+      })
+      .catch(() => false)
+      .finally(() => {
+        refreshInFlight = null;
+      });
+  }
+  return refreshInFlight;
+}
+
+async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  async function send(): Promise<Response> {
+    const headers: Record<string, string> = { Accept: "application/json" };
+    const token = getToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
+
+    let body: BodyInit | undefined;
+    if (options.formData) {
+      body = options.formData;
+    } else if (options.body !== undefined) {
+      headers["Content-Type"] = "application/json";
+      body = JSON.stringify(options.body);
+    }
+
+    try {
+      return await fetch(`${API_BASE}${path}`, {
+        method: options.method || (body ? "POST" : "GET"),
+        headers,
+        body,
+        signal: options.signal,
+        cache: "no-store",
+        credentials: "include",
+      });
+    } catch (error) {
+      if ((error as Error)?.name === "AbortError") throw error;
+      throw new ApiError(
+        0,
+        "NETWORK_ERROR",
+        "Cannot reach the TrendScope API. Check that the backend is running.",
+      );
+    }
   }
 
-  let response: Response;
-  try {
-    response = await fetch(`${API_BASE}${path}`, {
-      method: options.method || (body ? "POST" : "GET"),
-      headers,
-      body,
-      signal: options.signal,
-      cache: "no-store",
-    });
-  } catch (error) {
-    if ((error as Error)?.name === "AbortError") throw error;
-    throw new ApiError(
-      0,
-      "NETWORK_ERROR",
-      "Cannot reach the TrendScope API. Check that the backend is running.",
-    );
+  let response = await send();
+
+  if (
+    response.status === 401 &&
+    !options.noRedirect &&
+    !options.skipRefresh &&
+    !path.startsWith("/auth/")
+  ) {
+    if (await refreshAccessToken()) {
+      response = await send();
+    }
   }
 
   if (response.status === 401 && !options.noRedirect) {
@@ -170,20 +215,21 @@ export const api = {
       noRedirect: true,
     });
   },
+  /** Revoke the refresh token and clear its cookie. Called before sign-out. */
+  async logout(): Promise<void> {
+    try {
+      await request<void>("/auth/logout", {
+        method: "POST",
+        noRedirect: true,
+        skipRefresh: true,
+      });
+    } catch {
+      /* the local session is still cleared even if the API is unreachable */
+    }
+  },
   /** Fetch a file with auth, then hand it to the browser as a download. */
   async download(path: string, fallbackName: string): Promise<void> {
-    const token = getToken();
-    const response = await fetch(`${API_BASE}${path}`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
-    if (response.status === 401) {
-      clearSession();
-      redirectToLogin();
-      throw new ApiError(401, "UNAUTHENTICATED", "Your session has expired. Sign in again.");
-    }
-    if (!response.ok) {
-      throw new ApiError(response.status, "DOWNLOAD_FAILED", "Download failed.");
-    }
+    const response = await fetchFile(path, "DOWNLOAD_FAILED", "Download failed.");
     const disposition = response.headers.get("content-disposition") || "";
     const match = disposition.match(/filename="?([^";]+)"?/i);
     const filename = match?.[1] || fallbackName;
@@ -199,19 +245,33 @@ export const api = {
   },
   /** Open an authenticated file (used for the CSV template preview). */
   async text(path: string): Promise<string> {
-    const token = getToken();
-    const response = await fetch(`${API_BASE}${path}`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
-    if (response.status === 401) {
-      clearSession();
-      redirectToLogin();
-      throw new ApiError(401, "UNAUTHENTICATED", "Your session has expired. Sign in again.");
-    }
-    if (!response.ok) throw new ApiError(response.status, "FETCH_FAILED", "Fetch failed.");
+    const response = await fetchFile(path, "FETCH_FAILED", "Fetch failed.");
     return response.text();
   },
 };
+
+/** Authenticated file fetch that retries once after a silent token refresh. */
+async function fetchFile(path: string, code: string, message: string): Promise<Response> {
+  async function send(): Promise<Response> {
+    const token = getToken();
+    return fetch(`${API_BASE}${path}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      credentials: "include",
+    });
+  }
+
+  let response = await send();
+  if (response.status === 401 && (await refreshAccessToken())) {
+    response = await send();
+  }
+  if (response.status === 401) {
+    clearSession();
+    redirectToLogin();
+    throw new ApiError(401, "UNAUTHENTICATED", "Your session has expired. Sign in again.");
+  }
+  if (!response.ok) throw new ApiError(response.status, code, message);
+  return response;
+}
 
 type QueryValue = string | number | boolean | null | undefined | string[];
 

@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
   Bookmark,
+  Calculator,
   ClipboardCheck,
   Database,
   FileText,
@@ -27,6 +28,7 @@ const NAV = [
   { href: "/trending", label: "Trending", icon: TrendingUp },
   { href: "/categories", label: "Categories", icon: Radar },
   { href: "/watchlist", label: "Watchlist", icon: Bookmark },
+  { href: "/profit", label: "Profit", icon: Calculator },
   { href: "/reports", label: "Reports", icon: FileText },
   { href: "/sources", label: "Data sources", icon: Database },
 ];

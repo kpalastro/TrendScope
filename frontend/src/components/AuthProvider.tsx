@@ -8,7 +8,7 @@ type AuthState = {
   user: User | null;
   ready: boolean;
   login: (email: string, password: string) => Promise<User>;
-  logout: () => void;
+  logout: () => Promise<void>;
   isAdmin: boolean;
   canWrite: boolean;
 };
@@ -47,10 +47,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return result.user;
   }, []);
 
-  const logout = useCallback(() => {
-    clearSession();
-    setUser(null);
-    window.location.href = "/login";
+  const logout = useCallback(async () => {
+    // Revoke the refresh token server-side before clearing the local session;
+    // the API helper swallows network errors so sign-out always completes.
+    try {
+      await api.logout();
+    } finally {
+      clearSession();
+      setUser(null);
+      window.location.href = "/login";
+    }
   }, []);
 
   const value = useMemo<AuthState>(

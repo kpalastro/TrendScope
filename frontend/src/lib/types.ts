@@ -473,3 +473,78 @@ export type ScoringProfile = {
   is_default: boolean;
   created_at: string;
 };
+
+export type ProfitInputs = {
+  currency: string;
+  supplier_price: string;
+  international_shipping: string;
+  import_duty_rate_pct: number;
+  supplier_charges_gst: boolean;
+  gst_registered: boolean;
+  gst_rate_pct: number;
+  claim_input_tax_credit: boolean;
+  domestic_fulfilment: string;
+  packaging: string;
+  payment_fee_pct: number;
+  payment_fee_fixed: string;
+  advertising_cost_per_order: string;
+  selling_price_inc_gst: string;
+  return_rate_pct: number;
+  monthly_order_volumes: number[];
+};
+
+export type ProfitMonthlyRow = {
+  orders: number;
+  revenue_ex_gst: string;
+  gross_profit: string;
+  advertising_spend: string;
+  profit: string;
+};
+
+export type ProfitOutputs = {
+  landed_cost_ex_gst: string;
+  landed_cost_cash: string;
+  gst_on_landed_cost: string;
+  selling_price_ex_gst: string;
+  gst_remitted_per_sale: string;
+  gross_profit: string;
+  gross_margin_pct: number | null;
+  payment_fees: string;
+  returns_allowance: string;
+  contribution_margin: string;
+  contribution_margin_pct: number | null;
+  break_even_ad_cost: string;
+  advertising_cost_per_order: string;
+  profit_per_order: string;
+  profit_margin_pct: number | null;
+  monthly: ProfitMonthlyRow[];
+};
+
+export type ProfitCalculation = {
+  inputs: ProfitInputs;
+  assumptions_version: string;
+  outputs: ProfitOutputs;
+  warnings: string[];
+  disclaimer: string;
+};
+
+export type ProfitScenario = {
+  id: string;
+  product_id: string | null;
+  name: string;
+  currency: string;
+  assumptions_version: string;
+  inputs: ProfitInputs;
+  outputs: ProfitOutputs;
+  warnings: string[];
+  disclaimer: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ProfitAssumptions = {
+  assumptions_version: string;
+  defaults: Partial<ProfitInputs>;
+  notes: string[];
+  disclaimer: string;
+};
